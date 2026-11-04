@@ -6,7 +6,7 @@ Você precisa da sua própria ISO de **Futurama para Xbox**, NTSC-U ou PAL. Os d
 
 ## Estado
 
-Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. O APK já foi compilado e instalado em um Android ARM64: importação da ISO, abertura, vídeos e menu principal foram verificados. A validação de gameplay está em andamento; esta versão ainda não é uma release estável.
+Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. O APK foi compilado e instalado em um Android ARM64: ISO, abertura, vídeos, menu, retorno do segundo plano e início jogável de Planet Express com movimento e câmera por toque foram verificados. A campanha completa ainda não foi validada; esta versão é experimental.
 
 Consulte [a situação dos testes](docs/ANDROID_STATUS.md) e [a documentação original](docs/UPSTREAM_README.md).
 
