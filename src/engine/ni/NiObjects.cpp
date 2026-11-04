@@ -4,6 +4,7 @@
 #include "engine/ni/NiObjects.h"
 
 #include <cmath>
+#include <cstring>
 #include <functional>
 
 namespace fut::ni {

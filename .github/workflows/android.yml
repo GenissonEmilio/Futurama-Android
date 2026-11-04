@@ -28,6 +28,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
       - name: Install pinned Android tools
         run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;30.0.16248370' 'cmake;3.31.6'
       - name: Build debug APK without game data
