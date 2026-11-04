@@ -427,7 +427,10 @@ void ReserveHeap(u32 size) {
     // VirtualAlloc: zero-filled (orig HEAP_ZERO_MEMORY) and 64 KB aligned.
     g.region = static_cast<u8*>(VirtualAlloc(nullptr, total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
 #else
-    g.region = static_cast<u8*>(std::aligned_alloc(0x10000, (total + 0xFFFF) & ~0xFFFFu));
+    // posix_memalign is available from Android API 16; aligned_alloc needs API 28.
+    void* region = nullptr;
+    if (posix_memalign(&region, 0x10000, (total + 0xFFFF) & ~0xFFFFu) != 0) region = nullptr;
+    g.region = static_cast<u8*>(region);
     if (g.region) std::memset(g.region, 0, total);
 #endif
     if (!g.region) FatalError("MemoryManager: cannot reserve %u bytes", size);

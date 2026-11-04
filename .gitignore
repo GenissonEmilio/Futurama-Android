@@ -4,3 +4,26 @@ out/
 *.user
 *.iso
 .fut-export
+
+# Local game data must never be published.
+*.7z
+*.rar
+*.xbe
+*.img
+*.xmv
+*.bin
+!android/gradle/wrapper/gradle-wrapper.jar
+futurama/
+game-data/
+
+# Android outputs and local machine configuration.
+.gradle/
+.cxx/
+**/build/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+.idea/
+artifacts/

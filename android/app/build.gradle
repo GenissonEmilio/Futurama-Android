@@ -1,0 +1,37 @@
+plugins { id 'com.android.application' }
+
+def prebuiltDir = providers.gradleProperty('futuramaPrebuiltDir').orNull
+
+android {
+    namespace 'com.genisson.futuramarecomp'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
+    ndkVersion '30.0.16248370'
+    defaultConfig {
+        applicationId 'com.genisson.futuramarecomp'
+        minSdk 26
+        targetSdk 36
+        versionCode providers.gradleProperty('futuramaVersionCode').map { it as int }.getOrElse(1)
+        versionName providers.gradleProperty('futuramaVersionName').getOrElse('0.1.0')
+        ndk { abiFilters providers.gradleProperty('futuramaAbi').getOrElse('arm64-v8a') }
+        if (prebuiltDir == null) {
+            externalNativeBuild {
+                cmake {
+                    arguments '-DANDROID_STL=c++_shared', '-DBUILD_TESTING=OFF'
+                    targets 'futurama_android'
+                }
+            }
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    if (prebuiltDir == null) {
+        externalNativeBuild { cmake { path file('../../CMakeLists.txt'); version '3.31.6' } }
+    } else {
+        sourceSets.main.jniLibs.srcDirs = [file(prebuiltDir)]
+    }
+    buildTypes { release { minifyEnabled false } }
+    packaging { jniLibs { useLegacyPackaging = false } }
+}

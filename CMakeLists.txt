@@ -1,7 +1,9 @@
-# Futurama (Xbox, 2003) as a native Windows game: the release build, nothing else (no options, tests or
-# tools). Written by the original project's tools/export/export_clean.py from its release configuration.
+# Native Futurama: the original Windows target and the Android ARM64 platform.
+# Game data comes from the user's disc at runtime, never from the source tree.
 cmake_minimum_required(VERSION 3.25)
-project(FuturamaPC LANGUAGES C CXX)
+project(FuturamaRecomp LANGUAGES C CXX)
+
+option(FUT_BUILD_TESTS "Build portable runtime regression tests" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,7 +13,7 @@ if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8 /Zc:__cplusplus)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
-    add_compile_options(-Wall -Wextra)
+    add_compile_options(-Wall -Wextra -ffp-contract=off -fno-strict-aliasing)
 endif()
 # The static C / C++ runtime (/MT): the exe needs no VC++ redistributable, only DLLs that ship with Windows.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -132,7 +134,21 @@ add_library(fut_core STATIC
     src/video/xmv/Wmv2Kernels.cpp
     src/video/xmv/XmvDecoder.cpp
 )
-target_include_directories(fut_core PRIVATE src)
+target_include_directories(fut_core PUBLIC src)
+set_target_properties(fut_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(ANDROID)
+    add_library(futurama_android SHARED
+        src/platform/android/AndroidGame.cpp
+        src/platform/android/AndroidInput.cpp
+        src/platform/android/AndroidSoundBackend.cpp
+        src/platform/android/MovieService.cpp
+        src/render/gles/GLES3Device.cpp
+        src/render/TextureDecode.cpp
+    )
+    target_link_libraries(futurama_android PRIVATE fut_core android log EGL GLESv3 aaudio)
+    target_link_options(futurama_android PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384)
+elseif(WIN32)
 
 add_library(fut_render STATIC
     src/platform/win32/Window.cpp
@@ -155,3 +171,11 @@ if(MSVC)
 endif()
 target_include_directories(fut_game PRIVATE src)
 target_link_libraries(fut_game PRIVATE fut_core fut_render d3d11 dxgi d3dcompiler xinput xaudio2)
+endif()
+
+if(FUT_BUILD_TESTS)
+    enable_testing()
+    add_executable(fut_portable_tests tests/PortableRuntimeTests.cpp)
+    target_link_libraries(fut_portable_tests PRIVATE fut_core)
+    add_test(NAME portable_runtime COMMAND fut_portable_tests)
+endif()

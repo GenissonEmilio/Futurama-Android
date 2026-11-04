@@ -56,7 +56,8 @@ void CopyIds(const std::vector<u16>& src, std::vector<u16>& dst, u32& dstCount) 
 template <class... A>
 bool Put(std::string& out, const char* fmt, A... args) {
     char buf[0x400];
-    std::snprintf(buf, sizeof buf, fmt, args...);
+    if constexpr (sizeof...(A) == 0) std::snprintf(buf, sizeof buf, "%s", fmt);
+    else std::snprintf(buf, sizeof buf, fmt, args...);
     out += buf;
     return buf[0] != '\0';
 }

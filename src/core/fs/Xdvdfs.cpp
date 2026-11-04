@@ -11,7 +11,15 @@ constexpr char kMagic[] = "MICROSOFT*XBOX*MEDIA";
 constexpr u64 kPartitionOffsets[] = {0x0, 0x18300000, 0xFD90000, 0x2080000};   // XISO, XGD1, XGD2, XGD3
 constexpr u8 kAttrDirectory = 0x10;
 
-bool Seek(std::FILE* f, u64 offset) { return _fseeki64(f, static_cast<s64>(offset), SEEK_SET) == 0; }
+bool Seek(std::FILE* f, u64 offset) {
+#if defined(_WIN32)
+    return _fseeki64(f, static_cast<s64>(offset), SEEK_SET) == 0;
+#else
+    static_assert(sizeof(off_t) >= sizeof(s64), "Xbox disc images need 64-bit file offsets");
+    if (offset > static_cast<u64>(INT64_MAX)) return false;
+    return fseeko(f, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
 }  // namespace
 
 std::string Xdvdfs::Normalize(const std::string& path) {
@@ -29,7 +37,8 @@ std::string Xdvdfs::Normalize(const std::string& path) {
 bool Xdvdfs::Open(const std::string& imagePath, std::string& error) {
     entries_.clear();
     std::FILE* raw = nullptr;
-    if (fopen_s(&raw, imagePath.c_str(), "rb") != 0 || !raw) {
+    raw = std::fopen(imagePath.c_str(), "rb");
+    if (!raw) {
         error = "cannot open " + imagePath;
         return false;
     }
