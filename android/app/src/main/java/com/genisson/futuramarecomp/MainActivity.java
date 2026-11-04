@@ -60,7 +60,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private SurfaceView surface;
     private Controls controls;
     private File disc;
-    private boolean ready, started, resumed, surfaceReady, busy;
+    private boolean ready, started, resumed, surfaceReady, busy, openingGame;
 
     private static native String nativeValidateIso(String path);
     private native void nativeStart(Surface surface, String disc, String saves);
@@ -73,6 +73,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        // Some launchers deliver a fresh MAIN intent above the running GameActivity.
+        // Discard that duplicate before it can validate the disc and create another surface owner.
+        Intent launch = getIntent();
+        if (!(this instanceof GameActivity) && !isTaskRoot()
+                && Intent.ACTION_MAIN.equals(launch.getAction()) && launch.hasCategory(Intent.CATEGORY_LAUNCHER)) {
+            finish();
+            return;
+        }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         disc = new File(getFilesDir(), "futurama.iso");
         root = new FrameLayout(this);
@@ -195,7 +203,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void showGame() {
         if (!ready || busy || surface != null) return;
         if (!(this instanceof GameActivity)) {
-            startActivity(new Intent(this, GameActivity.class));
+            if (openingGame) return;
+            openingGame = true;
+            startActivity(new Intent(this, GameActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP));
             return;
         }
         launcher.setVisibility(View.GONE);
@@ -244,7 +255,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         } else nativeSurface(surface.getHolder().getSurface());
         nativePause(false);
     }
-    @Override protected void onResume() { super.onResume(); resumed = true; immersive(); startIfPossible(); if (started) nativePause(false); }
+    @Override protected void onResume() { super.onResume(); resumed = true; openingGame = false; immersive(); startIfPossible(); if (started) nativePause(false); }
     @Override protected void onPause() { resumed = false; if (controls != null) controls.clear(); if (started) nativePause(true); super.onPause(); }
     @Override protected void onDestroy() {
         destroyed = true; io.shutdownNow(); if (started) nativeStop(); started = false; super.onDestroy();

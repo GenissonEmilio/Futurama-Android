@@ -7,6 +7,7 @@
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
 #include <android/native_window.h>
+#include <android/log.h>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -232,22 +233,52 @@ GLES3Device::~GLES3Device()=default;
 bool GLES3Device::SetWindow(ANativeWindow* window,std::string& error) {
     Impl& d=*impl_;
     if(d.context==EGL_NO_CONTEXT){error="EGL context is not initialized";return false;}
-    EGLSurface next=d.pbuffer;
-    if(window) {
-        EGLint visual=0;eglGetConfigAttrib(d.display,d.config,EGL_NATIVE_VISUAL_ID,&visual);
-        ANativeWindow_setBuffersGeometry(window,0,0,visual);
-        next=eglCreateWindowSurface(d.display,d.config,window,nullptr);
-        if(next==EGL_NO_SURFACE){error="eglCreateWindowSurface failed: "+std::to_string(eglGetError());return false;}
+    // onResume and surfaceChanged can announce the same producer repeatedly.
+    // Creating a second EGL window surface for it fails with EGL_BAD_ALLOC.
+    if(window==d.window && (window?d.surface!=EGL_NO_SURFACE:d.surface==EGL_NO_SURFACE)) {
+        const EGLSurface current=window?d.surface:d.pbuffer;
+        if(!eglMakeCurrent(d.display,current,current,d.context)) {
+            error="eglMakeCurrent failed: "+std::to_string(eglGetError());return false;
+        }
+        error.clear();return true;
+    }
+    // Acquire before releasing the old reference: distinct ANativeWindow wrappers
+    // can refer to the same Android buffer producer. Disconnect the old EGL surface
+    // before trying to connect that producer again; the context stays on the pbuffer.
+    if(window)ANativeWindow_acquire(window);
+    if(!eglMakeCurrent(d.display,d.pbuffer,d.pbuffer,d.context)) {
+        const EGLint code=eglGetError();
+        if(window)ANativeWindow_release(window);
+        error="eglMakeCurrent(pbuffer) failed: "+std::to_string(code);return false;
+    }
+    if(d.surface!=EGL_NO_SURFACE && !eglDestroySurface(d.display,d.surface)) {
+        const EGLint code=eglGetError();
+        if(window)ANativeWindow_release(window);
+        error="eglDestroySurface failed: "+std::to_string(code);return false;
+    }
+    d.surface=EGL_NO_SURFACE;
+    if(d.window)ANativeWindow_release(d.window);
+    d.window=nullptr;
+    if(!window){error.clear();return true;}
+    EGLint visual=0;
+    if(!eglGetConfigAttrib(d.display,d.config,EGL_NATIVE_VISUAL_ID,&visual)) {
+        error="eglGetConfigAttrib failed: "+std::to_string(eglGetError());ANativeWindow_release(window);return false;
+    }
+    const int geometry=ANativeWindow_setBuffersGeometry(window,0,0,visual);
+    if(geometry<0) {
+        error="ANativeWindow_setBuffersGeometry failed: "+std::to_string(geometry);ANativeWindow_release(window);return false;
+    }
+    const EGLSurface next=eglCreateWindowSurface(d.display,d.config,window,nullptr);
+    if(next==EGL_NO_SURFACE) {
+        error="eglCreateWindowSurface failed: "+std::to_string(eglGetError());ANativeWindow_release(window);return false;
     }
     if(!eglMakeCurrent(d.display,next,next,d.context)) {
-        if(window)eglDestroySurface(d.display,next);
-        error="eglMakeCurrent failed: "+std::to_string(eglGetError());return false;
+        const EGLint code=eglGetError();eglDestroySurface(d.display,next);ANativeWindow_release(window);
+        error="eglMakeCurrent(window) failed: "+std::to_string(code);return false;
     }
-    if(window)ANativeWindow_acquire(window);
-    if(d.surface!=EGL_NO_SURFACE)eglDestroySurface(d.display,d.surface);
-    if(d.window)ANativeWindow_release(d.window);
-    d.window=window;d.surface=window?next:EGL_NO_SURFACE;
-    if(window)eglSwapInterval(d.display,1);
+    d.window=window;d.surface=next;
+    eglSwapInterval(d.display,1);
+    error.clear();
     return true;
 }
 bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
@@ -266,6 +297,7 @@ bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
     if(d.pbuffer==EGL_NO_SURFACE)return fail("eglCreatePbufferSurface");
     if(!SetWindow(window,error))return false;
     d.program=Program(kVertexShader,kFragmentShader,error);if(!d.program)return false;
+    __android_log_print(ANDROID_LOG_INFO,"FuturamaGL","GPU=%s GLES=%s",glGetString(GL_RENDERER),glGetString(GL_VERSION));
     constexpr char presentVS[]=R"(#version 300 es
     precision highp float;
     out vec2 uv;
@@ -273,7 +305,8 @@ bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
     constexpr char presentFS[]=R"(#version 300 es
     precision highp float;
     in vec2 uv;uniform sampler2D image;out vec4 color;
-    void main(){color=texture(image,uv);})";
+    // The Xbox backbuffer is X8R8G8B8: its unused alpha must not make the Android surface transparent.
+    void main(){color=vec4(texture(image,uv).rgb,1.0);})";
     d.present=Program(presentVS,presentFS,error);if(!d.present)return false;
     glGenVertexArrays(1,&d.vao);glBindVertexArray(d.vao);glGenBuffers(1,&d.vbo);glGenBuffers(1,&d.ibo);glGenBuffers(1,&d.ubo);
     glBindBuffer(GL_ARRAY_BUFFER,d.vbo);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,d.ibo);
@@ -579,8 +612,9 @@ void GLES3Device::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     Enable(GL_STENCIL_TEST,rs[RS_STENCILENABLE]!=0);glStencilMask(rs[RS_STENCILWRITEMASK]);
     glStencilFunc(GL_NEVER+((rs[RS_STENCILFUNC]-0x200)&7),rs[RS_STENCILREF]&0xFF,rs[RS_STENCILMASK]&0xFF);
     glStencilOp(Stencil(rs[RS_STENCILFAIL]),Stencil(rs[RS_STENCILZFAIL]),Stencil(rs[RS_STENCILPASS]));
-    // D3D's clockwise (top-left screen coordinates) is CCW in GL's bottom-left viewport.
-    glFrontFace(GL_CCW);Enable(GL_CULL_FACE,rs[RS_CULLMODE]!=0);
+    // The translated clip positions preserve visual winding. D3D11's
+    // FrontCounterClockwise=FALSE therefore maps to GL_CW (including screen polygons).
+    glFrontFace(GL_CW);Enable(GL_CULL_FACE,rs[RS_CULLMODE]!=0);
     glCullFace((rs[RS_CULLMODE]==0x900)!=(rs[RS_FRONTFACE]==0x901)?GL_FRONT:GL_BACK);
     Enable(GL_POLYGON_OFFSET_FILL,rs[RS_SOLIDOFFSETENABLE]!=0);glPolygonOffset(AsFloat(rs[RS_POLYGONOFFSETZSLOPESCALE]),AsFloat(rs[RS_POLYGONOFFSETZOFFSET]));
     Enable(GL_DITHER,rs[RS_DITHERENABLE]!=0);

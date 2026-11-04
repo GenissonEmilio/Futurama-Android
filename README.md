@@ -6,7 +6,7 @@ Você precisa da sua própria ISO de **Futurama para Xbox**, NTSC-U ou PAL. Os d
 
 ## Estado
 
-Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. Compatibilidade numérica e leitura de arquivos adaptadas para ARM64. A validação em aparelho está em andamento; esta versão ainda não é uma release estável.
+Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. O APK já foi compilado e instalado em um Android ARM64: importação da ISO, abertura, vídeos e menu principal foram verificados. A validação de gameplay está em andamento; esta versão ainda não é uma release estável.
 
 Consulte [a situação dos testes](docs/ANDROID_STATUS.md) e [a documentação original](docs/UPSTREAM_README.md).
 

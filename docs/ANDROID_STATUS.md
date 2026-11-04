@@ -16,12 +16,17 @@ Atualizado em 04/11/2026. Compilar um backend não comprova equivalência com o 
 - Fontes de áudio compiladas com NDK r30 para ARM64/API 26 com `-Wall -Wextra -Werror`.
 - GLES3 compilado sintaticamente com NDK r30 para ARM64/API 26; shaders compilados e linkados por ANGLE/WebGL2 headless.
 - Launcher Java compilado contra Android SDK 36 com JDK 17.
+- Build completo ARM64/API 26 e APK de desenvolvimento: passaram; pacote sem dados do disco e alinhamento de 16 KB verificados.
+- GitHub Actions: testes do núcleo em Linux e geração completa do APK passaram no commit `db54740`.
+- Aparelho POCO M8 Pro 5G, Android API 36: instalação, regressões numéricas nativas, importação da ISO pelo seletor, reabertura com a ISO instalada, vídeos, menu principal, seleção de New Game e abertura de Planet Express.
+- AAudio iniciou saída estéreo 48 kHz; os registros do sistema mostraram amostras não nulas. Qualidade sonora e equivalência ainda não foram aferidas por escuta.
+- A orientação dos polígonos foi corrigida após o teste em aparelho revelar tela preta; o menu e os vídeos passaram a renderizar.
 
 ## Em validação
 
-- Build completo do APK e carregamento das bibliotecas no aparelho.
-- ISO, abertura, vídeos, menu e primeira fase.
-- Áudio real, controles simultâneos, retorno do background e reconexão de superfície.
+- Gameplay da primeira fase e das demais fases.
+- Controles simultâneos, retorno do background e reconexão de superfície após as correções de ciclo de vida.
+- Qualidade do áudio, saves e controles físicos.
 - Desempenho sustentado e comparação de imagem com Windows.
 
 Dados usados localmente nos testes não são publicados. O APK não contém ISO, XBE, texturas, filmes nem arquivos de som do disco.
