@@ -39,8 +39,8 @@ XD3DDevice::XD3DDevice() {
         s->width = 640, s->height = 480, s->format = i == 0 ? 0x1E : 0x2A, s->levels = 1;
         frameBuffers_[i] = s;
     }
-    renderTarget = frameBuffers_[0];
-    depthStencil = frameBuffers_[1];
+    BindResource(renderTarget, frameBuffers_[0]);
+    BindResource(depthStencil, frameBuffers_[1]);
 }
 
 XD3DDevice::~XD3DDevice() = default;
@@ -55,11 +55,42 @@ Resource* XD3DDevice::NewResource(ResourceKind kind) {
 }
 
 Resource* XD3DDevice::FindResource(const void* p, ResourceKind kind) const {
-    const u8* b = static_cast<const u8*>(p);
-    for (const auto& r : resources_)
-        if (r->kind == kind && !r->data.empty() && b >= r->data.data() && b < r->data.data() + r->data.size())
-            return r.get();
+    if (!p) return nullptr;
+    const auto address = reinterpret_cast<std::uintptr_t>(p);
+    auto it = dataRanges_.upper_bound(address);
+    if (it == dataRanges_.begin()) return nullptr;
+    --it;
+    Resource* r = it->second;
+    if (r->kind == kind && address - it->first < r->data.size()) return r;
     return nullptr;
+}
+
+void XD3DDevice::RegisterData(Resource* r) {
+    if (!r->data.empty()) dataRanges_.emplace(reinterpret_cast<std::uintptr_t>(r->data.data()), r);
+}
+
+void XD3DDevice::BindResource(Resource*& slot, Resource* r) {
+    if (r && r->released) r = nullptr;                // a stale cached handle cannot resurrect a retired resource
+    if (slot == r) return;
+    Resource* old = slot;
+    if (r) ++r->bindings;                            // acquire before releasing (including aliased bindings)
+    slot = r;
+    if (old) {
+        --old->bindings;
+        RetireResource(old);
+    }
+}
+
+void XD3DDevice::RetireResource(Resource* r) {
+    if (!r || r->released || r->refs || r->bindings) return;
+    r->released = true;
+    OnResourceReleased(r);
+    if (!r->data.empty()) dataRanges_.erase(reinterpret_cast<std::uintptr_t>(r->data.data()));
+    std::vector<u8>().swap(r->data);                 // clear() alone keeps the large allocation
+    r->source = nullptr;
+    Resource* parent = r->parent;
+    r->parent = nullptr;
+    XD3DDevice::Release(parent);                     // balance GetSurfaceLevel2 without recording a synthetic call
 }
 
 void XD3DDevice::InitializeState() {                  // orig: 0x00239660 InitializeD3dState
@@ -88,6 +119,7 @@ void XD3DDevice::InitializeState() {                  // orig: 0x00239660 Initia
 Resource* XD3DDevice::CreateVertexBuffer2(u32 length) {
     Resource* r = NewResource(ResourceKind::kVertexBuffer);
     r->data.assign(length, 0);                        // (contiguous memory: zeroed by the oracle's allocator)
+    RegisterData(r);
     return r;
 }
 
@@ -99,11 +131,12 @@ Resource* XD3DDevice::CreateTexture2(u32 width, u32 height, u32 levels, u32 usag
     for (u32 l = 0, w = width, h = height; l < std::max(levels, 1u); ++l, w = std::max(w / 2, 1u), h = std::max(h / 2, 1u))
         bytes += LevelBytes(format, w, h);
     r->data.assign(bytes, 0);
+    RegisterData(r);
     return r;
 }
 
 u8* XD3DDevice::LockRect(Resource* surface) {
-    if (!surface || !surface->parent) return nullptr;
+    if (!surface || surface->released || !surface->parent) return nullptr;
     const Resource& t = *surface->parent;
     ++surface->parent->revision;                      // (the caller writes the texels)
     size_t at = 0;                                    // the level's offset: the levels before it
@@ -119,11 +152,12 @@ Resource* XD3DDevice::CreateStandAloneSurface(u32 width, u32 height, u32 format)
 }
 
 Resource* XD3DDevice::GetSurfaceLevel2(Resource* texture, u32 level) {
-    if (!texture) return nullptr;
+    if (!texture || texture->released || level >= std::max(texture->levels, 1u)) return nullptr;
     Resource* r = NewResource(ResourceKind::kSurface);
     r->parent = texture;
     r->level = level;
-    r->width = std::max(texture->width >> level, 1u), r->height = std::max(texture->height >> level, 1u);
+    r->width = level < 32 ? std::max(texture->width >> level, 1u) : 1u;
+    r->height = level < 32 ? std::max(texture->height >> level, 1u) : 1u;
     r->format = texture->format, r->levels = 1;
     ++texture->refs;                                  // (the surface holds its texture)
     return r;
@@ -132,22 +166,36 @@ Resource* XD3DDevice::GetSurfaceLevel2(Resource* texture, u32 level) {
 Resource* XD3DDevice::CreateIndexBuffer2(u32 length) {
     Resource* r = NewResource(ResourceKind::kIndexBuffer);
     r->data.assign(length, 0);
+    RegisterData(r);
     return r;
 }
 
-u8* XD3DDevice::Lock2(Resource* vb, u32) { return vb ? vb->data.data() : nullptr; }
+u8* XD3DDevice::Lock2(Resource* vb, u32) { return vb && !vb->released ? vb->data.data() : nullptr; }
 void XD3DDevice::GetDesc(Resource*) {}
 void XD3DDevice::AddRef(Resource* r) {
-    if (r) ++r->refs;
+    if (r && !r->released) ++r->refs;
 }
 void XD3DDevice::Release(Resource* r) {
-    if (r && r->refs) --r->refs;
+    if (r && !r->released && r->refs) {
+        --r->refs;
+        RetireResource(r);
+    }
 }
 
 void XD3DDevice::SetRenderTarget(Resource* color, Resource* depth) {
+    // Acquire the pair before dropping either old binding: swapping color/depth must not retire one midway.
+    if (color && color->released) color = nullptr;
+    if (depth && depth->released) depth = nullptr;
+    if (color) ++color->bindings;
+    if (depth) ++depth->bindings;
+    Resource* oldColor = renderTarget;
+    Resource* oldDepth = depthStencil;
     renderTarget = color;
     depthStencil = depth;
-    for (Resource* r : {color, depth})
+    for (Resource* r : {oldColor, oldDepth}) {
+        if (r) { --r->bindings; RetireResource(r); }
+    }
+    for (Resource* r : {renderTarget, depthStencil})
         if (r && r->parent) r->parent->rendered = true;
 }
 
@@ -183,19 +231,19 @@ void XD3DDevice::LightEnable(u32 index, bool enable) {   // orig: 0x00234F00
 }
 
 void XD3DDevice::SetTexture(u32 stage, Resource* texture) {
-    if (stage < kNumStages) textures[stage] = texture;
+    if (stage < kNumStages) BindResource(textures[stage], texture);
 }
 
 void XD3DDevice::SetStreamSource(u32 stream, Resource* vb, u32 stride) {
     if (stream != 0) return;
-    streamSource = vb;
+    BindResource(streamSource, vb);
     streamStride = stride;
 }
 
 void XD3DDevice::SetIndices(Resource* ib, u32 base) {   // D3D__IndexData = ib->Data
-    indices = ib;
+    BindResource(indices, ib);
     baseVertex = base;
-    indexData = ib ? reinterpret_cast<const u16*>(ib->data.data()) : nullptr;
+    indexData = indices ? reinterpret_cast<const u16*>(indices->data.data()) : nullptr;
 }
 
 void XD3DDevice::SetVertexShader(u32 handle) { vertexShader = handle; }

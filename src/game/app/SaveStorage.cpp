@@ -11,6 +11,21 @@
 #include <iterator>
 #include <system_error>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <io.h>
+// The storage interface deliberately has the XAPI names, rather than Win32's ANSI/Unicode aliases.
+#undef CreateFile
+#undef CopyFile
+#undef SetFileAttributes
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace fut::game::app {
 
 namespace {
@@ -125,7 +140,11 @@ u32 MemorySaveStorage::CreateSaveGame(const std::u16string& name, u32 dispositio
         ret = 0;
         path = "U:\\" + s->dir + "\\";
     }
-    if (created) Changed(*s);
+    if (created && !Changed(*s)) {
+        saves.pop_back();
+        path.clear();
+        return 29;                                   // ERROR_WRITE_FAULT
+    }
     return ret;
 }
 
@@ -133,7 +152,7 @@ u32 MemorySaveStorage::DeleteSaveGame(const std::u16string& name) {
     auto it = std::find_if(saves.begin(), saves.end(), [&](const Save& s) { return s.name == name; });
     const bool found = it != saves.end();
     if (found) {
-        Removed(*it);
+        if (!Removed(*it)) return 29;
         saves.erase(it);
     }
     return found ? 0 : 2;
@@ -150,12 +169,18 @@ u32 MemorySaveStorage::CreateFile(const std::string& path, [[maybe_unused]] u32 
     } else if (disposition == 3 && !s->files.count(key)) {
         // OPEN_EXISTING of a missing file (last error 2)
     } else {
+        std::optional<File> original;
+        const bool truncated = disposition == 1 || disposition == 2 || !s->files.count(key);
+        if (truncated && s->files.count(key)) original = s->files[key];
         if (disposition == 1 || disposition == 2 || !s->files.count(key))   // CREATE_NEW / CREATE_ALWAYS: truncated
             s->files[key] = File{fname, {}};
         h = kSaveHandle + nextHandle_++;
         Handle& hd = handles_[h];
         hd.dir = s->dir;
         hd.key = key;
+        hd.fileName = fname;
+        hd.truncated = truncated;
+        hd.original = std::move(original);
     }
     return h;
 }
@@ -187,13 +212,26 @@ bool MemorySaveStorage::WriteFileEx(u32 h, const u8* data, u32 n, u32 routine) {
     if (it == handles_.end() || it->second.find) return false;
     Handle& hd = it->second;
     Save* s = FindSave(nullptr, &hd.dir);
+    // A rejected write restored the pre-open file (or removed a new one). Reapply the open's truncation when the
+    // caller retries the same handle, without discarding the original needed for another rollback.
+    if (s && hd.truncated && !hd.written) s->files[hd.key] = File{hd.fileName, {}};
     if (s && s->files.count(hd.key)) {
+        const File before = s->files[hd.key];
         std::vector<u8>& f = s->files[hd.key].data;
         if (f.size() < hd.filePos + n) f.resize(hd.filePos + n);
-        std::copy(data, data + n, f.begin() + std::ptrdiff_t(hd.filePos));
+        if (n) std::copy(data, data + n, f.begin() + std::ptrdiff_t(hd.filePos));
+        if (!Changed(*s)) {
+            if (hd.truncated && !hd.written) {
+                if (hd.original) s->files[hd.key] = *hd.original;
+                else s->files.erase(hd.key);
+            } else {
+                s->files[hd.key] = before;
+            }
+            return false;                            // MemoryCards::WriteFile reports its write-error UI
+        }
         hd.filePos += n;
         hd.written = true;
-    }
+    } else return false;
     completions_.push_back(Completion{routine, 0, n});   // (OVERLAPPED: success, n bytes)
     return true;
 }
@@ -201,12 +239,7 @@ bool MemorySaveStorage::WriteFileEx(u32 h, const u8* data, u32 n, u32 routine) {
 bool MemorySaveStorage::CloseHandle(u32 h) {
     auto it = handles_.find(h);
     if (it == handles_.end()) return false;           // (not the model's: the XAPI's own)
-    if (!it->second.find) {
-        Save* s = FindSave(nullptr, &it->second.dir);
-        if (it->second.written && s && s->files.count(it->second.key)) {
-            Changed(*s);
-        }
-    }
+    // The write was persisted before its completion was queued; closing must not silently retry a failed write.
     handles_.erase(it);
     return true;
 }
@@ -231,8 +264,14 @@ bool MemorySaveStorage::CopyFile(const std::string& source, const std::string& p
     const bool have = readDisc && readDisc(rel, data);
     const bool ok = s && !fname.empty() && have;
     if (ok) {
+        const auto old = s->files.find(Lower(fname));
+        const std::optional<File> before = old == s->files.end() ? std::nullopt : std::optional<File>(old->second);
         [[maybe_unused]] File& f = s->files[Lower(fname)] = File{fname, std::move(data)};
-        Changed(*s);
+        if (!Changed(*s)) {
+            if (before) s->files[Lower(fname)] = *before;
+            else s->files.erase(Lower(fname));
+            return false;
+        }
     }
     return ok;
 }
@@ -273,22 +312,116 @@ bool MemorySaveStorage::SignatureEnd(u32 h, std::array<u8, 20>& digest) {
 
 // ---- the host directory ---------------------------------------------------------------------------------------------
 
+namespace {
+bool SaveDirectory(const std::string& name) {
+    return name.size() == 12 && std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c); });
+}
+
+std::filesystem::path TransactionPath(const std::filesystem::path& root, const std::string& dir, const char* suffix) {
+    return root / (".save-" + dir + suffix);
+}
+
+bool SyncDirectory(const std::filesystem::path& path) {
+#ifdef _WIN32
+    // Directory renames below use MoveFileExW's write-through mode on Windows.
+    (void)path;
+    return true;
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return false;
+    const bool ok = ::fsync(fd) == 0;
+    return ::close(fd) == 0 && ok;
+#endif
+}
+
+bool Rename(const std::filesystem::path& from, const std::filesystem::path& to) {
+#ifdef _WIN32
+    return ::MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    return !ec;
+#endif
+}
+
+bool WriteDurably(const std::filesystem::path& path, const u8* data, size_t size) {
+#ifdef _WIN32
+    FILE* file = ::_wfopen(path.c_str(), L"wb");
+#else
+    FILE* file = std::fopen(path.c_str(), "wb");
+#endif
+    if (!file) return false;
+    bool ok = size == 0 || std::fwrite(data, 1, size, file) == size;
+    if (std::fflush(file) != 0) ok = false;
+#ifdef _WIN32
+    if (::_commit(::_fileno(file)) != 0) ok = false;
+#else
+    if (::fsync(::fileno(file)) != 0) ok = false;
+#endif
+    if (std::fclose(file) != 0) ok = false;
+    return ok;
+}
+
+// A backup is the last committed save if the process stopped before installing its replacement. Pending data is
+// never loaded. Leave an unrecoverable backup in place, so a subsequent write cannot overwrite the only good copy.
+bool Recover(const std::filesystem::path& root, const std::string& dir) {
+    std::error_code ec;
+    const auto live = root / dir;
+    const auto backup = TransactionPath(root, dir, ".backup");
+    const bool haveBackup = std::filesystem::exists(backup, ec);
+    if (ec) return false;
+    if (haveBackup) {
+        const bool haveLive = std::filesystem::exists(live, ec);
+        if (ec) return false;
+        if (!haveLive) {
+            if (!Rename(backup, live) || !SyncDirectory(root)) return false;
+        } else {
+            std::filesystem::remove_all(backup, ec);
+            if (ec) return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+
 HostSaveStorage::HostSaveStorage(std::filesystem::path root) : root_(std::move(root)) {
     std::error_code ec;
     std::filesystem::create_directories(root_, ec);
     std::vector<std::filesystem::path> dirs;
-    for (const auto& e : std::filesystem::directory_iterator(root_, ec))
-        if (e.is_directory()) dirs.push_back(e.path());
+    // Recover interrupted replacements before enumerating the original, unchanged on-disk layout.
+    std::vector<std::string> recover;
+    for (std::filesystem::directory_iterator it(root_, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.size() == 25 && name.substr(0, 6) == ".save-" && name.substr(18) == ".backup" &&
+            SaveDirectory(name.substr(6, 12))) {
+            const std::string dir = name.substr(6, 12);
+            recover.push_back(dir);
+            // Even a currently unrecoverable backup reserves its number; never replace it with a new save.
+            nextDir_ = std::max<u32>(nextDir_, static_cast<u32>(std::strtoul(dir.c_str(), nullptr, 16)) + 1);
+        }
+    }
+    for (const auto& dir : recover) Recover(root_, dir);
+    ec.clear();
+    for (std::filesystem::directory_iterator it(root_, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string dir = it->path().filename().string();
+        if (!SaveDirectory(dir)) continue;
+        nextDir_ = std::max<u32>(nextDir_, static_cast<u32>(std::strtoul(dir.c_str(), nullptr, 16)) + 1);
+        if (it->is_directory(ec)) dirs.push_back(it->path());
+    }
     std::sort(dirs.begin(), dirs.end());              // (12 hex digits: the creation order)
     for (const std::filesystem::path& p : dirs) {
         Save s;
         s.dir = p.filename().string();
-        for (const auto& f : std::filesystem::directory_iterator(p, ec)) {
-            if (!f.is_regular_file()) continue;
-            std::ifstream in(f.path(), std::ios::binary);
+        bool loaded = true, haveName = false;
+        for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            std::ifstream in(it->path(), std::ios::binary);
+            if (!in) { loaded = false; break; }
             std::vector<u8> data((std::istreambuf_iterator<char>(in)), {});
-            const std::string name = f.path().filename().string();
+            if (in.bad()) { loaded = false; break; }
+            const std::string name = it->path().filename().string();
             if (name == "name.txt") {
+                haveName = true;
                 for (size_t i = 0; i < data.size();) {   // UTF-8 -> UTF-16
                     u32 c = data[i++];
                     if (c >= 0xE0 && i + 1 < data.size()) c = ((c & 15) << 12) | ((data[i] & 63u) << 6) | (data[i + 1] & 63u), i += 2;
@@ -300,7 +433,8 @@ HostSaveStorage::HostSaveStorage(std::filesystem::path root) : root_(std::move(r
             s.files[Lower(name)] = File{name, std::move(data)};
         }
         nextDir_ = std::max<u32>(nextDir_, static_cast<u32>(std::strtoul(s.dir.c_str(), nullptr, 16)) + 1);
-        saves.push_back(std::move(s));
+        if (loaded && haveName && !ec) saves.push_back(std::move(s));
+        ec.clear();
     }
 }
 
@@ -311,10 +445,18 @@ u64 HostSaveStorage::FreeBytes(u32 site) {
     return MemorySaveStorage::FreeBytes(site);
 }
 
-void HostSaveStorage::Changed(const Save& s) {
+bool HostSaveStorage::Changed(const Save& s) {
     std::error_code ec;
     const std::filesystem::path p = root_ / s.dir;
-    std::filesystem::create_directories(p, ec);
+    if (!SaveDirectory(s.dir)) return false;
+    std::filesystem::create_directories(root_, ec);
+    if (ec || !Recover(root_, s.dir)) return false;
+    const auto pending = TransactionPath(root_, s.dir, ".pending");
+    const auto backup = TransactionPath(root_, s.dir, ".backup");
+    // A stale staging directory contains only uncommitted data from an earlier interrupted write.
+    std::filesystem::remove_all(pending, ec);
+    if (ec || !std::filesystem::create_directory(pending, ec) || ec) return false;
+    const auto abandon = [&] { std::error_code ignored; std::filesystem::remove_all(pending, ignored); return false; };
     std::string name;
     for (char16_t c : s.name) {                       // UTF-16 -> UTF-8
         if (c < 0x80) name += static_cast<char>(c);
@@ -323,15 +465,49 @@ void HostSaveStorage::Changed(const Save& s) {
             name += static_cast<char>(0xE0 | (c >> 12)), name += static_cast<char>(0x80 | ((c >> 6) & 63)),
                 name += static_cast<char>(0x80 | (c & 63));
     }
-    std::ofstream(p / "name.txt", std::ios::binary).write(name.data(), std::streamsize(name.size()));
-    for (const auto& [key, f] : s.files)
-        std::ofstream(p / f.name, std::ios::binary)
-            .write(reinterpret_cast<const char*>(f.data.data()), std::streamsize(f.data.size()));
+    if (!WriteDurably(pending / "name.txt", reinterpret_cast<const u8*>(name.data()), name.size())) return abandon();
+    for (const auto& [key, f] : s.files) {
+        if (f.name.empty() || f.name == "." || f.name == ".." || Lower(f.name) == "name.txt" ||
+            f.name.find_first_of("/\\:") != std::string::npos) return abandon();
+        if (!WriteDurably(pending / f.name, f.data.data(), f.data.size())) return abandon();
+    }
+    if (!SyncDirectory(pending)) return abandon();
+    const bool existed = std::filesystem::exists(p, ec);
+    if (ec) return abandon();
+    if (existed && !Rename(p, backup)) return abandon();
+    if (!SyncDirectory(root_) || !Rename(pending, p)) {
+        if (existed) Rename(backup, p);
+        SyncDirectory(root_);
+        return abandon();
+    }
+    if (!SyncDirectory(root_)) {
+        // Roll back before reporting failure. Keep the backup if the filesystem also rejects recovery.
+        if (Rename(p, pending) && existed) Rename(backup, p);
+        SyncDirectory(root_);
+        return abandon();
+    }
+    // This is already committed. Failed housekeeping leaves a harmless backup for the next recovery pass.
+    std::filesystem::remove_all(backup, ec);
+    SyncDirectory(root_);
+    return true;
 }
 
-void HostSaveStorage::Removed(const Save& s) {
+bool HostSaveStorage::Removed(const Save& s) {
     std::error_code ec;
-    std::filesystem::remove_all(root_ / s.dir, ec);
+    if (!SaveDirectory(s.dir) || !Recover(root_, s.dir)) return false;
+    const auto live = root_ / s.dir;
+    const auto deleted = TransactionPath(root_, s.dir, ".deleted");
+    std::filesystem::remove_all(deleted, ec);
+    if (ec || !Rename(live, deleted)) return false;
+    if (!SyncDirectory(root_)) {
+        Rename(deleted, live);
+        SyncDirectory(root_);
+        return false;
+    }
+    // An interrupted recursive deletion must not make a partially deleted save visible on reload.
+    std::filesystem::remove_all(deleted, ec);
+    SyncDirectory(root_);
+    return true;
 }
 
 }  // namespace fut::game::app

@@ -36,6 +36,7 @@ namespace fut::render::nixbox {
 class NiXBoxTextureManager {
 public:
     explicit NiXBoxTextureManager(xd3d::XD3DDevice& device) : d3d_(device) {}
+    ~NiXBoxTextureManager();
     bool Precache(ni::NiSourceTexture& texture);     // orig: 0x001473E0 / 0x0015E0A0
     bool Prepare(ni::NiObject* texture, xd3d::Resource*& d3d, bool& set, bool& mips);
     // orig: the source texture data's dtor (NiTexture 0x00118490 deletes +0x20): the D3D texture released, the

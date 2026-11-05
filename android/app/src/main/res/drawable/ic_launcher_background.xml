@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original vector artwork for Futurama Android. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#101C38" android:pathData="M0 0H108V108H0Z" />
+    <path android:fillColor="#162C4C" android:pathData="M108 0V108H0Z" />
+    <path android:fillColor="#264968" android:pathData="M81 54C81 68.91 68.91 81 54 81C39.09 81 27 68.91 27 54C27 39.09 39.09 27 54 27C68.91 27 81 39.09 81 54Z" />
+    <path android:fillColor="#1B3554" android:pathData="M78 54C78 67.25 67.25 78 54 78C40.75 78 30 67.25 30 54C30 40.75 40.75 30 54 30C67.25 30 78 40.75 78 54Z" />
+    <path android:fillColor="#82B9C9" android:pathData="M77 28H79V30H77Z" />
+    <path android:fillColor="#54849D" android:pathData="M27 39H29V41H27Z" />
+    <path android:fillColor="#54849D" android:pathData="M73 78H75V80H73Z" />
+</vector>

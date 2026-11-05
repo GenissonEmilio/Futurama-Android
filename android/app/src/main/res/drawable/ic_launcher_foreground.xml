@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original vector artwork for Futurama Android. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#0A152B" android:pathData="M29 67L43 42L53 46L67 36C73 33 82 36 82 42C83 53 64 70 47 72L35 75L35 67Z" />
+    <path android:fillColor="#D7464A" android:pathData="M45 51L43 37Q43 34 46 36L59 44Z" />
+    <path android:fillColor="#FF6B60" android:pathData="M45 39L47 49L52 46Z" />
+    <path android:fillColor="#DC4D50" android:pathData="M51 63L58 74Q59 76 61 73L68 57Z" />
+    <path android:fillColor="#FA7465" android:pathData="M57 65L60 70L64 60Z" />
+    <path android:fillColor="#E04B4F" android:pathData="M38 57L28 59L33 66L28 72L43 67Z" />
+    <path android:fillColor="#FFCF76" android:pathData="M34 61L25 67L36 66Z" />
+    <path android:fillColor="#F18A55" android:pathData="M35 63L28 68L38 66Z" />
+    <path android:fillColor="#267F69" android:pathData="M37 53Q48 45 65 39Q75 35 79 40Q85 48 66 62Q54 71 39 67L34 62Z" />
+    <path android:fillColor="#68C78A" android:pathData="M37 53Q48 45 65 39Q75 35 79 40Q80 46 66 54Q49 63 35 60Z" />
+    <path android:fillColor="#A5E5AA" android:pathData="M42 51Q55 43 67 41Q72 39 75 40Q61 44 48 53Z" />
+    <path android:fillColor="#3BA57A" android:pathData="M36 60Q50 64 67 54Q59 64 43 65L36 63Z" />
+    <path android:fillColor="#143D50" android:pathData="M70 44C70 48.42 66.42 52 62 52C57.58 52 54 48.42 54 44C54 39.58 57.58 36 62 36C66.42 36 70 39.58 70 44Z" />
+    <path android:fillColor="#ED615B" android:pathData="M68 44C68 47.31 65.31 50 62 50C58.69 50 56 47.31 56 44C56 40.69 58.69 38 62 38C65.31 38 68 40.69 68 44Z" />
+    <path android:fillColor="#A8E4DF" android:pathData="M65.5 44C65.5 45.93 63.93 47.5 62 47.5C60.07 47.5 58.5 45.93 58.5 44C58.5 42.07 60.07 40.5 62 40.5C63.93 40.5 65.5 42.07 65.5 44Z" />
+    <path android:fillColor="#E5FFFF" android:pathData="M59.5 43.5Q60 40.5 63 41L61 44Z" />
+    <path android:fillColor="#194C4D" android:pathData="M39 55L42 53L45 59L42 61Z" />
+    <path android:fillColor="#B3E4AA" android:pathData="M40 55L41 54.5L43 59L42 59.5Z" />
+</vector>

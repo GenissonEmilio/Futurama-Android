@@ -16,7 +16,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build/tests -DFUT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build portable core and tests
-        run: cmake --build build/tests --target fut_portable_tests -j2
+        run: cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests -j2
       - name: Run tests
         run: ctest --test-dir build/tests --output-on-failure
 

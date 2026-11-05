@@ -10,7 +10,7 @@ public:
     GLES3Device();
     ~GLES3Device() override;
     // All methods, including destruction and surface replacement, run on the render thread.
-    bool Init(ANativeWindow* window, std::string& error);
+    bool Init(ANativeWindow* window, std::string& error, float renderScale = 1.0f);
     // nullptr detaches the window while preserving the context and all game GPU resources.
     bool SetWindow(ANativeWindow* window, std::string& error);
     u32 draws() const { return draws_; }
@@ -23,5 +23,6 @@ private:
     std::unique_ptr<Impl> impl_;
     u32 draws_ = 0;
     void Draw(u32 primitive, const u16* list, u32 count, u32 start);
+    void OnResourceReleased(Resource* r) override;
 };
 }

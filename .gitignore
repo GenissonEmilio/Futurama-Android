@@ -27,3 +27,4 @@ local.properties
 *.keystore
 .idea/
 artifacts/
+__pycache__/

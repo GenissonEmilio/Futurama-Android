@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,8 @@ public:
     const Entry* Find(const std::string& path) const;
     // Reads `size` bytes at `offset` of the image. False on a short read.
     bool Read(u64 offset, void* out, size_t size) const;
-    // Whole-file read.
+    // Whole-file reads have a memory budget; larger files use Read/ReadDisc streaming.
+    static constexpr size_t kMaxReadFileBytes = 256u << 20;
     bool ReadFile(const std::string& path, std::vector<u8>& out) const;
     size_t FileCount() const { return entries_.size(); }
 
@@ -37,10 +39,13 @@ private:
     struct FileCloser {
         void operator()(std::FILE* f) const { if (f) std::fclose(f); }
     };
-    void Walk(u32 sector, u32 size, const std::string& prefix, int depth);
+    bool Walk(u32 sector, u32 size, const std::string& prefix, int depth);
 
     std::unique_ptr<std::FILE, FileCloser> file_;
     u64 partition_ = 0;
+    u64 fileSize_ = 0;
+    u64 indexBytes_ = 0;
+    std::set<u64> activeDirectories_;
     std::map<std::string, Entry> entries_;
 };
 

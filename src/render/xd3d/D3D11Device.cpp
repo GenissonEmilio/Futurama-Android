@@ -405,6 +405,7 @@ D3D11_TEXTURE_ADDRESS_MODE Address(u32 v) {
 // formats deswizzled and expanded to RGBA8 (the channel's v * 255 / max, rounded: L, NV2A expands by replicating
 // the high bits), DXT1 / DXT3 / DXT5 as BC1 / BC2 / BC3. False for the formats not handled.
 bool DecodeXboxTexels(const Resource& r, DecodedTexture& out) {
+    if(!r.width||!r.height||r.width>16384||r.height>16384||r.levels>32)return false;
     struct Masks { u32 a, r, g, b, bytes; };
     Masks m{};
     switch (r.format) {
@@ -434,8 +435,8 @@ bool DecodeXboxTexels(const Resource& r, DecodedTexture& out) {
     size_t at = 0;
     for (u32 l = 0, w = r.width, h = r.height; l < std::max(r.levels, 1u); ++l, w = std::max(w / 2, 1u),
                                                                           h = std::max(h / 2, 1u)) {
-        const size_t bytes = LevelBytes(r.format, w, h);
-        if (at + bytes > r.data.size()) return false;
+        const size_t bytes = block ? LevelBytes(r.format, w, h) : size_t(w)*h*m.bytes;
+        if (at > r.data.size() || bytes > r.data.size()-at) return false;
         const u8* src = r.data.data() + at;
         if (block) {
             out.levels.emplace_back(src, src + bytes);
@@ -511,6 +512,37 @@ struct D3D11Device::Impl {
 
 D3D11Device::D3D11Device() : impl_(std::make_unique<Impl>()) {}
 D3D11Device::~D3D11Device() = default;
+
+void D3D11Device::OnResourceReleased(Resource* r) {
+    Impl& d = *impl_;
+    auto texture = d.textures.find(r);
+    auto target = d.targets.find(r);
+    if (texture == d.textures.end() && target == d.targets.end()) return;
+    // The immediate context retains bound views independently of our caches. Remove matching views now, on
+    // the same owning render thread as Draw; the next Clear/draw restores its current target and textures.
+    if (d.ctx) {
+        ID3D11ShaderResourceView* bound[4] = {};
+        d.ctx->PSGetShaderResources(0, 4, bound);
+        for (UINT i = 0; i < 4; ++i) {
+            if (bound[i] && ((texture != d.textures.end() && bound[i] == texture->second.srv.Get()) ||
+                            (target != d.targets.end() && bound[i] == target->second.srv.Get()))) {
+                ID3D11ShaderResourceView* none = nullptr;
+                d.ctx->PSSetShaderResources(i, 1, &none);
+            }
+            if (bound[i]) bound[i]->Release();
+        }
+        if (target != d.targets.end()) {
+            ComPtr<ID3D11RenderTargetView> color;
+            ComPtr<ID3D11DepthStencilView> depth;
+            d.ctx->OMGetRenderTargets(1, &color, &depth);
+            if ((color && color.Get() == target->second.rtv.Get()) ||
+                (depth && depth.Get() == target->second.dsv.Get()))
+                d.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        }
+    }
+    if (texture != d.textures.end()) d.textures.erase(texture);
+    if (target != d.targets.end()) d.targets.erase(target);
+}
 
 bool D3D11Device::Init(HWND__* window, std::string& error) {
     Impl& d = *impl_;
@@ -636,7 +668,7 @@ ID3D11ShaderResourceView* D3D11Device::Impl::Texture(Resource* r) {
     DecodedTexture dt;
     // the Xbox texels the texture manager wrote; a texture made at its first use (its creator not ported) has none:
     // the source's NiPixelData decoded instead (L)
-    const bool xbox = r->levels && !std::all_of(r->data.begin(), r->data.end(), [](u8 v) { return v == 0; }) &&
+    const bool xbox = r->levels && (r->revision || !std::all_of(r->data.begin(), r->data.end(), [](u8 v) { return v == 0; })) &&
                       DecodeXboxTexels(*r, dt);
     if (!xbox && (!st || !st->pixelDataObj || !DecodePixelData(*st->pixelDataObj, dt))) {
         NotPorted("D3D11Device: a texture without decodable pixel data (white)");

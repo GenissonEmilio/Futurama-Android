@@ -8,11 +8,12 @@ android {
     buildToolsVersion '35.0.0'
     ndkVersion '30.0.16248370'
     defaultConfig {
-        applicationId 'com.genisson.futuramarecomp'
+        applicationId providers.gradleProperty('futuramaApplicationId').getOrElse('com.genisson.futurama.android')
+        manifestPlaceholders = [futuramaAppLabel: providers.gradleProperty('futuramaAppLabel').getOrElse('@string/app_name')]
         minSdk 26
         targetSdk 36
-        versionCode providers.gradleProperty('futuramaVersionCode').map { it as int }.getOrElse(1)
-        versionName providers.gradleProperty('futuramaVersionName').getOrElse('0.1.0')
+        versionCode providers.gradleProperty('futuramaVersionCode').map { it as int }.getOrElse(20)
+        versionName providers.gradleProperty('futuramaVersionName').getOrElse('0.2.0')
         ndk { abiFilters providers.gradleProperty('futuramaAbi').getOrElse('arm64-v8a') }
         if (prebuiltDir == null) {
             externalNativeBuild {

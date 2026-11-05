@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <algorithm>
+#include <sys/system_properties.h>
 
 namespace fut::platform {
 
@@ -69,6 +70,11 @@ render::xd3d::XD3DDevice* MovieService::Device(ni::NiRenderer* renderer) {
 }
 
 std::unique_ptr<game::app::MovieFile> MovieService::Open(const std::string& path) {
+    // Developer-only repeatable gameplay profiling. Normal launches always use the user's movies.
+    char profile[PROP_VALUE_MAX]{},skip[PROP_VALUE_MAX]{};
+    __system_property_get("debug.futurama.profile",profile);
+    __system_property_get("debug.futurama.skip_movies",skip);
+    if(profile[0]=='1'&&skip[0]=='1')return nullptr;
     u64 size = 0;
     if (!vfs_.DiscFileSize(path, size))
         return nullptr;

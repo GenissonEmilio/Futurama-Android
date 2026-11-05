@@ -1,6 +1,7 @@
 #include "platform/android/AndroidGame.h"
 #include "platform/android/AndroidSoundBackend.h"
 #include "platform/android/MovieService.h"
+#include "platform/android/FrameProfiler.h"
 #include "core/XbeImage.h"
 #include "core/fs/Vfs.h"
 #include "game/app/App.h"
@@ -65,7 +66,10 @@ void AndroidGame::Run() {
         const auto& xbeFile = xbe::GameImage().Bytes();
         render::xd3d::GLES3Device device;
         // Start on a pbuffer: lifecycle requests are applied below on the context's owner thread.
-        if (!device.Init(nullptr, error)) throw std::runtime_error(error);
+        char scaleValue[PROP_VALUE_MAX]{};
+        __system_property_get("debug.futurama.render_scale",scaleValue);
+        const float renderScale=scaleValue[0]?std::strtof(scaleValue,nullptr):2.0f;
+        if (!device.Init(nullptr, error, renderScale)) throw std::runtime_error(error);
         render::nixbox::NiXBoxRenderer renderer(device);
         AndroidSoundBackend::Options options;
         options.stepStatus = true;
@@ -93,7 +97,12 @@ void AndroidGame::Run() {
         text::CreateAppFont(services.readFile);
         game::app::App app(services);
         app.qpc = 0;
-        if (!app.Init()) throw std::runtime_error("The game could not initialize. Check that the selected disc is a supported Futurama Xbox image.");
+        FrameProfiler profiler;
+        char benchmarkLevel[PROP_VALUE_MAX]{};
+        if (profiler.Enabled()) __system_property_get("debug.futurama.level", benchmarkLevel);
+        const bool direct = benchmarkLevel[0] && game::app::LevelRecords::Index(benchmarkLevel) >= 0;
+        if (!app.Init(direct ? benchmarkLevel : nullptr)) throw std::runtime_error("The game could not initialize. Check that the selected disc is a supported Futurama Xbox image.");
+        profiler.Reset();
         message_("", false);
         using Clock = std::chrono::steady_clock;
         auto previous = Clock::now();
@@ -113,6 +122,7 @@ void AndroidGame::Run() {
                     if (!audioPaused) { movies.SetPaused(true); backend.SetPaused(true); audioPaused = true; }
                     wake_.wait(lock, [&] { return stopping_ || applied_ != requested_ || (!paused_ && requestedWindow_); });
                     previous = Clock::now();
+                    profiler.Reset();
                     continue;
                 }
                 if (audioPaused) { movies.SetPaused(false); backend.SetPaused(false); audioPaused = false; }
@@ -122,8 +132,13 @@ void AndroidGame::Run() {
             previous = now;
             app.qpc += static_cast<u64>(std::clamp<int64_t>(elapsed, 0, 250000000));
             app.frame = frame++;
+            const unsigned previousDraws = device.draws();
+            profiler.Begin();
             if (!app.Frame()) { message_("The game has finished. Reopen the app to play again.", false); break; }
             if (offline) { droppedAudio.clear(); backend.RenderFrames(25 * app.lastSteps, droppedAudio); }
+            profiler.End(app.Current() ? app.Current()->name.c_str() : "",
+                         app.CurrentLevel() ? app.CurrentLevel()->name.c_str() : app.LevelName(),
+                         device.draws() - previousDraws);
             // eglSwapInterval is the primary pacing; a tiny yield also covers drivers that ignore it.
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }

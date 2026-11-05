@@ -14,6 +14,7 @@
 #include "render/xd3d/XD3DTypes.h"
 
 #include <map>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,8 @@ struct Resource {
     std::string id;
     std::vector<u8> data;                             // the contents in the Xbox layout
     u32 refs = 1;                                     // Common bits 0-15 (the creator's reference)
+    u32 bindings = 0;                                 // device holds, separate from the visible reference count
+    bool released = false;                            // stable handle tombstone; payload and GPU views are gone
     u32 width = 0, height = 0, format = 0, levels = 0;   // pixel containers
     Resource* parent = nullptr;                       // a surface's texture
     u32 level = 0;                                    // a texture surface's level
@@ -100,7 +103,7 @@ public:
     virtual u8* Lock2(Resource* vb, u32 flags);       // D3DVertexBuffer_Lock2: the data
     virtual void GetDesc(Resource* vb);               // D3DVertexBuffer_GetDesc (recorded only)
     virtual void AddRef(Resource* r);
-    virtual void Release(Resource* r);                // (memory is never reused: handles are never reused either)
+    virtual void Release(Resource* r);                // frees payload after the last reference and device binding
 
     virtual void SetRenderTarget(Resource* color, Resource* depth);
     virtual void SetViewport(const D3DVIEWPORT8& vp);
@@ -132,10 +135,22 @@ public:
     Resource* FindResource(const void* p, ResourceKind kind) const;
 
 protected:
+    // All resource and binding calls run on the backend's owning render thread. Called exactly once before
+    // discarding the CPU payload/parent; backends remove GPU views here while their context is still alive.
+    virtual void OnResourceReleased(Resource* r) {}
     Resource* NewResource(ResourceKind kind);
+    // Descriptors deliberately survive as tombstones: renderer state caches hold raw handle pointers and oracle
+    // handle names/addresses must never be recycled. Large payloads and backend caches do not survive Release.
     std::vector<std::unique_ptr<Resource>> resources_;
     u32 counts_[5] = {};                              // per handle prefix: vb, ib, tex (cube textures too), surf, pal
     Resource* frameBuffers_[2] = {};
+
+private:
+    void RegisterData(Resource* r);
+    void BindResource(Resource*& slot, Resource* r);
+    void RetireResource(Resource* r);
+    // Only live payloads, indexed by address; lookup cost is independent of historical tombstone count.
+    std::map<std::uintptr_t, Resource*> dataRanges_;
 };
 
 }  // namespace fut::render::xd3d

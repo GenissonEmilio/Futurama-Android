@@ -25,9 +25,10 @@ public:
     // kGuardBytes zero bytes are appended: the original can match the table's zero padding as an empty-named entry
     // (lookup of "") and then reads size/offset from just past the loaded buffer. The guard makes that read
     // deterministic (zeros) instead of heap garbage. See docs/KNOWN_ISSUES.md.
-    explicit ImgArchive(std::vector<u8> table) : table_(std::move(table)) { table_.resize(table_.size() + kGuardBytes, 0); }
+    explicit ImgArchive(std::vector<u8> table);
 
     static constexpr size_t kGuardBytes = 16;
+    static constexpr size_t kMaxTableBytes = 64u << 20;
 
     // Reads the directory table from an open .img file the way MountArchive does. Returns false on I/O error.
     static bool ReadTable(const std::string& imgPath, std::vector<u8>& table);
@@ -40,6 +41,7 @@ public:
 
 private:
     std::vector<u8> table_;
+    size_t loadedBytes_ = 0;
 };
 
 // orig: g_Archives (0x002D7B8C) + MountArchive / FindInArchives. Lookup is first-match in mount order.

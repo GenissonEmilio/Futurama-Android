@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Futurama Recompiled</string>
+    <string name="app_name">Futurama Android</string>
     <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">#9fe45c</item>

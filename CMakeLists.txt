@@ -19,6 +19,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_library(fut_core STATIC
+    src/render/TextureDecode.cpp
     src/core/FatalError.cpp
     src/core/XbeImage.cpp
     src/core/memory/MemoryManager.cpp
@@ -138,16 +139,20 @@ target_include_directories(fut_core PUBLIC src)
 set_target_properties(fut_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(ANDROID)
+    option(FUT_ANDROID_OPTIMIZE_DEBUG "Keep Android debug APKs playable; disable for unoptimized stepping" ON)
     add_library(futurama_android SHARED
         src/platform/android/AndroidGame.cpp
         src/platform/android/AndroidInput.cpp
         src/platform/android/AndroidSoundBackend.cpp
         src/platform/android/MovieService.cpp
         src/render/gles/GLES3Device.cpp
-        src/render/TextureDecode.cpp
     )
     target_link_libraries(futurama_android PRIVATE fut_core android log EGL GLESv3 aaudio)
     target_link_options(futurama_android PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384)
+    if(FUT_ANDROID_OPTIMIZE_DEBUG)
+        target_compile_options(fut_core PRIVATE $<$<CONFIG:Debug>:-O2>)
+        target_compile_options(futurama_android PRIVATE $<$<CONFIG:Debug>:-O2>)
+    endif()
 elseif(WIN32)
 
 add_library(fut_render STATIC
@@ -156,7 +161,6 @@ add_library(fut_render STATIC
     src/platform/win32/Launcher.cpp
     src/platform/win32/XAudio2SoundBackend.cpp
     src/platform/win32/MovieService.cpp
-    src/render/TextureDecode.cpp
     src/render/xd3d/D3D11Device.cpp
 )
 target_include_directories(fut_render PRIVATE src)
@@ -178,4 +182,20 @@ if(FUT_BUILD_TESTS)
     add_executable(fut_portable_tests tests/PortableRuntimeTests.cpp)
     target_link_libraries(fut_portable_tests PRIVATE fut_core)
     add_test(NAME portable_runtime COMMAND fut_portable_tests)
+    foreach(suite IN ITEMS SaveStorage ResourceLifetime FilesystemSafety TextureConversion)
+        add_executable(fut_${suite}_tests tests/${suite}Tests.cpp)
+        target_link_libraries(fut_${suite}_tests PRIVATE fut_core)
+        add_test(NAME ${suite} COMMAND fut_${suite}_tests)
+    endforeach()
+    if(ANDROID)
+        add_executable(fut_android_gles_tests tests/AndroidGlesTests.cpp)
+        target_include_directories(fut_android_gles_tests PRIVATE src)
+        target_link_libraries(fut_android_gles_tests PRIVATE futurama_android EGL GLESv3)
+        add_test(NAME android_gles COMMAND fut_android_gles_tests)
+        add_executable(fut_android_raster_tests tests/AndroidRasterTests.cpp)
+        target_include_directories(fut_android_raster_tests PRIVATE src)
+        target_link_libraries(fut_android_raster_tests PRIVATE futurama_android EGL GLESv3)
+        add_test(NAME android_raster COMMAND fut_android_raster_tests)
+        add_test(NAME android_scaled COMMAND fut_android_raster_tests --scaled)
+    endif()
 endif()

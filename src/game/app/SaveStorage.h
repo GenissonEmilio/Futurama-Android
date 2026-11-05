@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -113,8 +114,8 @@ public:
 
 protected:
     // A save game or one of its files changed (HostSaveStorage persists it).
-    virtual void Changed(const Save& s) { (void)s; }
-    virtual void Removed(const Save& s) { (void)s; }
+    virtual bool Changed(const Save& s) { (void)s; return true; }
+    virtual bool Removed(const Save& s) { (void)s; return true; }
     u32 nextDir_ = 1;                                 // the directory counter
 
 private:
@@ -122,9 +123,11 @@ private:
         bool find = false;
         std::vector<std::u16string> names;            // (find) the names at FindFirst
         size_t pos = 0;
-        std::string dir, key;                         // (file)
+        std::string dir, key, fileName;               // (file)
         size_t filePos = 0;
         bool written = false;
+        bool truncated = false;
+        std::optional<File> original;                // restore CREATE_ALWAYS on a failed host write
     };
     Save* FindSave(const std::u16string* name, const std::string* dir);
     std::map<u32, Handle> handles_;
@@ -134,16 +137,17 @@ private:
 };
 
 // The model in a host directory: one sub-directory per save game (its files, and its display name in name.txt as
-// UTF-8), loaded at construction, written back on every change. Its directory counter continues after the highest
-// existing one.
+// UTF-8), loaded at construction. Changes are staged and flushed before replacing a save; a backup permits recovery
+// if the process stops between directory renames. Persistence errors reach the caller before write success is queued.
+// Its directory counter continues after the highest existing one. One owner per root is required.
 class HostSaveStorage : public MemorySaveStorage {
 public:
     explicit HostSaveStorage(std::filesystem::path root);
     u64 FreeBytes(u32 site) override;
 
 protected:
-    void Changed(const Save& s) override;
-    void Removed(const Save& s) override;
+    bool Changed(const Save& s) override;
+    bool Removed(const Save& s) override;
 
 private:
     std::filesystem::path root_;

@@ -9,11 +9,13 @@
 #include <android/native_window.h>
 #include <android/log.h>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <set>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -21,7 +23,7 @@ namespace fut::render::xd3d {
 namespace {
 void NotPorted(const char* what) {
     static std::set<std::string> seen;
-    if (seen.insert(what).second) std::fprintf(stderr,"GLES3 limitation: %s\n",what);
+    if (seen.insert(what).second) __android_log_print(ANDROID_LOG_WARN,"FuturamaGL","GLES3 limitation: %s",what);
 }
 struct LightCB {
     f32 diffuse[4], specular[4], ambient[4], pos[4], dir[4], att[4], spot[4];
@@ -36,12 +38,13 @@ struct DrawCB {
     s32 tci[4][4], colorOp[4][4], alphaOp[4][4], stageMisc[4][4], lightCount[4];
     LightCB lights[8];
     f32 texScale[4][4];
+    f32 lodBias[4];
 };
 
 struct CVertex {                                      // the canonical vertex the input layout reads
     f32 pos[4], nrm[3], d0[4], d1[4], uv[4][4];
 };
-static_assert(sizeof(DrawCB)==1920, "std140 fixed-function uniform layout changed");
+static_assert(sizeof(DrawCB)==1936, "std140 fixed-function uniform layout changed");
 static_assert(sizeof(CVertex)==124, "canonical vertex layout changed");
 
 void Color(u32 argb, f32 out[4]) {
@@ -56,6 +59,7 @@ f32 AsFloat(u32 v) {
 
 
 bool DecodeXboxTexels(const Resource& r, DecodedTexture& out) {
+    if(!r.width||!r.height||r.width>16384||r.height>16384||r.levels>32)return false;
     struct Masks { u32 a, r, g, b, bytes; };
     Masks m{};
     switch (r.format) {
@@ -85,8 +89,9 @@ bool DecodeXboxTexels(const Resource& r, DecodedTexture& out) {
     size_t at = 0;
     for (u32 l = 0, w = r.width, h = r.height; l < std::max(r.levels, 1u); ++l, w = std::max(w / 2, 1u),
                                                                           h = std::max(h / 2, 1u)) {
-        const size_t bytes = LevelBytes(r.format, w, h);
-        if (at + bytes > r.data.size()) return false;
+        // The decoder reads the concrete format, even if an absent/damaged XBE format table says otherwise.
+        const size_t bytes = block ? LevelBytes(r.format, w, h) : size_t(w)*h*m.bytes;
+        if (at > r.data.size() || bytes > r.data.size()-at) return false;
         const u8* src = r.data.data() + at;
         if (block) {
             out.levels.emplace_back(src, src + bytes);
@@ -155,7 +160,8 @@ std::vector<u8> ExpandBC(const std::vector<u8>& src,u32 w,u32 h,DecodedTexture::
     }
     return out;
 }
-GLenum Address(u32 mode) { return mode==2?GL_MIRRORED_REPEAT:mode==3||mode==4?GL_CLAMP_TO_EDGE:GL_REPEAT; }
+constexpr GLenum kClampToBorder=0x812D,kTextureBorderColor=0x1004; // EXT/OES_texture_border_clamp
+GLenum Address(u32 mode,bool border) { return mode==2?GL_MIRRORED_REPEAT:mode==4&&border?kClampToBorder:mode==3||mode==4?GL_CLAMP_TO_EDGE:GL_REPEAT; }
 GLenum Blend(u32 v) {
     switch(v) {
     case 0: case 1: case 0x300: case 0x301: case 0x302: case 0x303: case 0x304: case 0x305:
@@ -195,14 +201,38 @@ struct GLES3Device::Impl {
     EGLSurface surface=EGL_NO_SURFACE,pbuffer=EGL_NO_SURFACE;
     EGLConfig config=nullptr;
     ANativeWindow* window=nullptr;
-    GLuint program=0,vao=0,vbo=0,ibo=0,ubo=0,fbo=0,white=0,present=0;
+    GLuint program=0,vao=0,fbo=0,white=0,present=0; // vao is the attribute-free presentation VAO.
     GLuint sampler[4]{};
+    std::array<u32,8> samplerState[4]{};
+    bool samplerValid[4]{};
+    bool borderClamp=false;
+    float renderScale=1;
+    const Resource* mainColor=nullptr;
+    const Resource* mainDepth=nullptr;
+    GLuint attachedColor=0,attachedDepth=0;
+    bool attachmentsValid=false,framebufferComplete=false;
     struct Target { GLuint texture=0,depth=0;u32 width=0,height=0; };
-    struct Tex { GLuint texture=0;u32 revision=0; };
+    struct Tex { GLuint texture=0;u32 revision=0,width=0,height=0,levels=0; };
     std::unordered_map<const Resource*,Target> targets;
     std::unordered_map<const Resource*,Tex> textures;
     std::vector<CVertex> verts;
     std::vector<u32> idx;
+    std::vector<u8> videoPixels;
+    struct StreamBuffer { GLuint name=0;size_t capacity=0,used=0; };
+    struct StreamBank {
+        StreamBuffer vertex,index,uniform;
+        GLuint vao=0; // Each VAO captures this bank's distinct VBO and IBO names.
+        GLsync fence=nullptr;
+    };
+    static constexpr size_t kBankCount=3,kStreamBudget=60*1024*1024;
+    std::array<StreamBank,kBankCount> streamBanks{};
+    size_t activeBank=kBankCount,nextBank=0;
+    size_t uniformAlignment=1;
+    void SealBank();
+    bool ReclaimBank(StreamBank& bank,bool wait);
+    void DeleteBank(StreamBank& bank);
+    StreamBank& PrepareDraw(size_t vertexBytes,size_t indexBytes,size_t uniformBytes);
+    size_t Upload(GLenum target,StreamBuffer& buffer,const void* data,size_t bytes,size_t alignment=1);
     ~Impl();
     Target* ColorTarget(Resource* r);
     Target* DepthTarget(Resource* r);
@@ -215,10 +245,13 @@ GLES3Device::Impl::~Impl() {
     if(display==EGL_NO_DISPLAY) return;
     if(context!=EGL_NO_CONTEXT) {
         eglMakeCurrent(display,pbuffer,pbuffer,context);
+        // Shutdown is the only unconditional wait: no mapped/queued stream storage survives its context.
+        glFinish();
+        for(auto& bank:streamBanks)DeleteBank(bank);
         for(auto& [key,t]:targets){glDeleteTextures(1,&t.texture);glDeleteRenderbuffers(1,&t.depth);}
         for(auto& [key,t]:textures)glDeleteTextures(1,&t.texture);
         glDeleteSamplers(4,sampler);glDeleteProgram(program);glDeleteProgram(present);glDeleteVertexArrays(1,&vao);
-        glDeleteBuffers(1,&vbo);glDeleteBuffers(1,&ibo);glDeleteBuffers(1,&ubo);glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&white);
+        glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&white);
         eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);
     }
     if(surface!=EGL_NO_SURFACE)eglDestroySurface(display,surface);
@@ -229,6 +262,151 @@ GLES3Device::Impl::~Impl() {
 }
 GLES3Device::GLES3Device():impl_(std::make_unique<Impl>()){}
 GLES3Device::~GLES3Device()=default;
+
+void GLES3Device::Impl::SealBank() {
+    if(activeBank==kBankCount)return;
+    StreamBank& bank=streamBanks[activeBank];
+    // Called only between complete draws, after the final consumer of all three streams was submitted.
+    bank.fence=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+    if(!bank.fence)throw std::runtime_error("GLES streaming fence creation failed");
+    glFlush(); // Pbuffer tests/loading frames must make progress without eglSwapBuffers.
+    activeBank=kBankCount;
+}
+
+bool GLES3Device::Impl::ReclaimBank(StreamBank& bank,bool wait) {
+    if(bank.fence) {
+        GLenum result=glClientWaitSync(bank.fence,0,0);
+        while(wait&&result==GL_TIMEOUT_EXPIRED)
+            result=glClientWaitSync(bank.fence,GL_SYNC_FLUSH_COMMANDS_BIT,1000000); // 1 ms, only if every bank is busy.
+        if(result==GL_WAIT_FAILED)throw std::runtime_error("GLES streaming fence wait failed");
+        if(result==GL_TIMEOUT_EXPIRED)return false;
+        if(result!=GL_ALREADY_SIGNALED&&result!=GL_CONDITION_SATISFIED)
+            throw std::runtime_error("GLES streaming fence returned an invalid status");
+        glDeleteSync(bank.fence);bank.fence=nullptr;
+    }
+    bank.vertex.used=bank.index.used=bank.uniform.used=0;
+    return true;
+}
+
+void GLES3Device::Impl::DeleteBank(StreamBank& bank) {
+    if(bank.fence)glDeleteSync(bank.fence);
+    // Delete the VAO first so its attribute/element bindings cannot retain deleted buffer storage.
+    glDeleteVertexArrays(1,&bank.vao);
+    glDeleteBuffers(1,&bank.vertex.name);glDeleteBuffers(1,&bank.index.name);glDeleteBuffers(1,&bank.uniform.name);
+    bank={};
+}
+
+GLES3Device::Impl::StreamBank& GLES3Device::Impl::PrepareDraw(size_t vertexBytes,size_t indexBytes,size_t uniformBytes) {
+    auto fits=[](const StreamBuffer& buffer,size_t bytes,size_t alignment) {
+        const size_t padding=(alignment-buffer.used%alignment)%alignment;
+        return buffer.used<=buffer.capacity&&padding<=buffer.capacity-buffer.used&&
+               bytes<=buffer.capacity-buffer.used-padding;
+    };
+    if(activeBank!=kBankCount) {
+        StreamBank& bank=streamBanks[activeBank];
+        if(fits(bank.vertex,vertexBytes,sizeof(CVertex))&&fits(bank.index,indexBytes,alignof(u32))&&
+           fits(bank.uniform,uniformBytes,uniformAlignment))return bank;
+        SealBank();
+    }
+    size_t chosen=kBankCount;
+    for(size_t n=0;n<kBankCount;++n) {
+        const size_t candidate=(nextBank+n)%kBankCount;
+        if(ReclaimBank(streamBanks[candidate],false)){chosen=candidate;break;}
+    }
+    if(chosen==kBankCount) {
+        chosen=nextBank;
+        ReclaimBank(streamBanks[chosen],true);
+    }
+    StreamBank& bank=streamBanks[chosen];
+    const size_t vertexCapacity=std::max({bank.vertex.capacity,size_t(8*1024*1024),vertexBytes});
+    const size_t indexCapacity=std::max({bank.index.capacity,size_t(2*1024*1024),indexBytes});
+    const size_t uniformCapacity=std::max({bank.uniform.capacity,size_t(2*1024*1024),uniformBytes});
+    if(vertexCapacity>kStreamBudget||indexCapacity>kStreamBudget-vertexCapacity||
+       uniformCapacity>kStreamBudget-vertexCapacity-indexCapacity)
+        throw std::runtime_error("GLES draw exceeds the 60 MiB streaming budget");
+    const size_t wanted=vertexCapacity+indexCapacity+uniformCapacity;
+    auto allocated=[](const StreamBank& b){return b.vertex.capacity+b.index.capacity+b.uniform.capacity;};
+    size_t total=wanted;
+    for(size_t n=0;n<kBankCount;++n)if(n!=chosen)total+=allocated(streamBanks[n]);
+    // Unusually large draws may borrow the other banks' capacity, but never exceed the pool budget.
+    for(size_t n=0;total>kStreamBudget&&n<kBankCount;++n)if(n!=chosen) {
+        StreamBank& other=streamBanks[n];
+        ReclaimBank(other,true);
+        total-=allocated(other);
+        DeleteBank(other);
+    }
+    const bool newVao=bank.vao==0;
+    if(newVao)glGenVertexArrays(1,&bank.vao);
+    glBindVertexArray(bank.vao);
+    auto reserve=[](GLenum target,StreamBuffer& buffer,size_t capacity) {
+        if(!buffer.name)glGenBuffers(1,&buffer.name);
+        glBindBuffer(target,buffer.name);
+        if(buffer.capacity>=capacity)return;
+        // This bank's fence has completed (or the bank is new): no in-flight storage is orphaned.
+        glBufferData(target,static_cast<GLsizeiptr>(capacity),nullptr,GL_STREAM_DRAW);
+        GLint actual=0;glGetBufferParameteriv(target,GL_BUFFER_SIZE,&actual);
+        if(actual<0||static_cast<size_t>(actual)!=capacity)
+            throw std::runtime_error("GLES streaming buffer allocation failed");
+        buffer.capacity=capacity;
+    };
+    reserve(GL_ARRAY_BUFFER,bank.vertex,vertexCapacity);
+    reserve(GL_ELEMENT_ARRAY_BUFFER,bank.index,indexCapacity);
+    reserve(GL_UNIFORM_BUFFER,bank.uniform,uniformCapacity);
+    if(newVao) {
+        glBindBuffer(GL_ARRAY_BUFFER,bank.vertex.name);
+        const size_t offsets[]={offsetof(CVertex,pos),offsetof(CVertex,nrm),offsetof(CVertex,d0),offsetof(CVertex,d1),
+            offsetof(CVertex,uv[0]),offsetof(CVertex,uv[1]),offsetof(CVertex,uv[2]),offsetof(CVertex,uv[3])};
+        for(GLuint i=0;i<8;++i) {
+            glEnableVertexAttribArray(i);
+            glVertexAttribPointer(i,i==1?3:4,GL_FLOAT,GL_FALSE,sizeof(CVertex),reinterpret_cast<void*>(offsets[i]));
+        }
+    }
+    activeBank=chosen;nextBank=(chosen+1)%kBankCount;
+    return bank;
+}
+
+size_t GLES3Device::Impl::Upload(GLenum target,StreamBuffer& buffer,const void* data,size_t bytes,size_t alignment) {
+    const size_t offset=buffer.used+(alignment-buffer.used%alignment)%alignment;
+    if(offset>buffer.capacity||bytes>buffer.capacity-offset)
+        throw std::runtime_error("GLES draw was not reserved in its streaming bank");
+    glBindBuffer(target,buffer.name);
+    void* mapped=glMapBufferRange(target,static_cast<GLintptr>(offset),static_cast<GLsizeiptr>(bytes),
+                                 GL_MAP_WRITE_BIT|GL_MAP_UNSYNCHRONIZED_BIT);
+    if(!mapped)throw std::runtime_error("GLES streaming buffer mapping failed");
+    std::memcpy(mapped,data,bytes);
+    if(glUnmapBuffer(target)!=GL_TRUE)throw std::runtime_error("GLES streaming buffer contents invalidated");
+    buffer.used=offset+bytes;
+    return offset;
+}
+
+void GLES3Device::OnResourceReleased(Resource* r) {
+    // Release/Set* and draws share the owning render thread and its current EGL context (also when detached,
+    // on the pbuffer). Surface views share their parent's color target, so erase only this exact cache key.
+    Impl& d=*impl_;
+    if(auto it=d.textures.find(r);it!=d.textures.end()) {
+        glDeleteTextures(1,&it->second.texture);
+        d.textures.erase(it);
+    }
+    if(auto it=d.targets.find(r);it!=d.targets.end()) {
+        // A previous Clear/draw may still have this view attached while the default framebuffer is bound for
+        // presentation. Detach explicitly so deletion does not retain storage until the next target bind.
+        GLint previous=0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING,&previous);
+        glBindFramebuffer(GL_FRAMEBUFFER,d.fbo);
+        GLint color=0,depth=0;
+        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,&color);
+        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,&depth);
+        if(it->second.texture && GLuint(color)==it->second.texture)
+            glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,0,0);
+        if(it->second.depth && GLuint(depth)==it->second.depth)
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,0);
+        glBindFramebuffer(GL_FRAMEBUFFER,GLuint(previous));
+        glDeleteTextures(1,&it->second.texture);
+        glDeleteRenderbuffers(1,&it->second.depth);
+        d.targets.erase(it);
+        d.attachmentsValid=false;
+    }
+}
 
 bool GLES3Device::SetWindow(ANativeWindow* window,std::string& error) {
     Impl& d=*impl_;
@@ -281,7 +459,7 @@ bool GLES3Device::SetWindow(ANativeWindow* window,std::string& error) {
     error.clear();
     return true;
 }
-bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
+bool GLES3Device::Init(ANativeWindow* window,std::string& error,float renderScale) {
     Impl& d=*impl_;if(d.context!=EGL_NO_CONTEXT)return SetWindow(window,error);
     auto fail=[&](const char* msg){error=std::string(msg)+": "+std::to_string(eglGetError());return false;};
     d.display=eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -296,6 +474,10 @@ bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
     const EGLint pb[]={EGL_WIDTH,1,EGL_HEIGHT,1,EGL_NONE};d.pbuffer=eglCreatePbufferSurface(d.display,d.config,pb);
     if(d.pbuffer==EGL_NO_SURFACE)return fail("eglCreatePbufferSurface");
     if(!SetWindow(window,error))return false;
+    d.renderScale=std::isfinite(renderScale)?std::clamp(renderScale,1.f,2.f):1.f;
+    d.mainColor=backBuffer();d.mainDepth=depthBuffer();
+    const char* extensions=reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+    d.borderClamp=extensions&&(std::strstr(extensions,"GL_EXT_texture_border_clamp")||std::strstr(extensions,"GL_OES_texture_border_clamp"));
     d.program=Program(kVertexShader,kFragmentShader,error);if(!d.program)return false;
     __android_log_print(ANDROID_LOG_INFO,"FuturamaGL","GPU=%s GLES=%s",glGetString(GL_RENDERER),glGetString(GL_VERSION));
     constexpr char presentVS[]=R"(#version 300 es
@@ -308,11 +490,9 @@ bool GLES3Device::Init(ANativeWindow* window,std::string& error) {
     // The Xbox backbuffer is X8R8G8B8: its unused alpha must not make the Android surface transparent.
     void main(){color=vec4(texture(image,uv).rgb,1.0);})";
     d.present=Program(presentVS,presentFS,error);if(!d.present)return false;
-    glGenVertexArrays(1,&d.vao);glBindVertexArray(d.vao);glGenBuffers(1,&d.vbo);glGenBuffers(1,&d.ibo);glGenBuffers(1,&d.ubo);
-    glBindBuffer(GL_ARRAY_BUFFER,d.vbo);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,d.ibo);
-    const size_t offsets[]={offsetof(CVertex,pos),offsetof(CVertex,nrm),offsetof(CVertex,d0),offsetof(CVertex,d1),
-        offsetof(CVertex,uv[0]),offsetof(CVertex,uv[1]),offsetof(CVertex,uv[2]),offsetof(CVertex,uv[3])};
-    for(GLuint i=0;i<8;++i){glEnableVertexAttribArray(i);glVertexAttribPointer(i,i==1?3:4,GL_FLOAT,GL_FALSE,sizeof(CVertex),reinterpret_cast<void*>(offsets[i]));}
+    glGenVertexArrays(1,&d.vao);glBindVertexArray(d.vao);
+    GLint uniformAlignment=1;glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT,&uniformAlignment);
+    d.uniformAlignment=static_cast<size_t>(std::max(1,uniformAlignment));
     glUseProgram(d.program);glUniformBlockBinding(d.program,glGetUniformBlockIndex(d.program,"Draw"),0);
     for(int i=0;i<4;++i){std::string name="tex"+std::to_string(i);glUniform1i(glGetUniformLocation(d.program,name.c_str()),i);}
     glUseProgram(d.present);glUniform1i(glGetUniformLocation(d.present,"image"),0);
@@ -327,6 +507,7 @@ GLES3Device::Impl::Target* GLES3Device::Impl::ColorTarget(Resource* r) {
     if(!r)return nullptr;Resource* key=r->parent?r->parent:r;
     auto it=targets.find(key);if(it!=targets.end())return &it->second;
     Target t;t.width=std::max(1u,key->width);t.height=std::max(1u,key->height);
+    if(key==mainColor){t.width=u32(std::lround(t.width*renderScale));t.height=u32(std::lround(t.height*renderScale));}
     glGenTextures(1,&t.texture);glBindTexture(GL_TEXTURE_2D,t.texture);
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,t.width,t.height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
     // Rendered Xbox textures expose one level; keep mipmapped sampler states complete.
@@ -338,15 +519,21 @@ GLES3Device::Impl::Target* GLES3Device::Impl::ColorTarget(Resource* r) {
 GLES3Device::Impl::Target* GLES3Device::Impl::DepthTarget(Resource* r) {
     if(!r)return nullptr;auto it=targets.find(r);if(it!=targets.end())return &it->second;
     Target t;t.width=std::max(1u,r->width);t.height=std::max(1u,r->height);
+    if(r==mainDepth){t.width=u32(std::lround(t.width*renderScale));t.height=u32(std::lround(t.height*renderScale));}
     glGenRenderbuffers(1,&t.depth);glBindRenderbuffer(GL_RENDERBUFFER,t.depth);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,t.width,t.height);
     return &(targets[r]=t);
 }
 bool GLES3Device::Impl::BindTarget(Resource* c,Resource* z) {
     Target* ct=ColorTarget(c);Target* dt=DepthTarget(z);if(!ct)return false;
     glBindFramebuffer(GL_FRAMEBUFFER,fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ct->texture,0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,dt?dt->depth:0);
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+    const GLuint depth=dt?dt->depth:0;
+    if(!attachmentsValid||attachedColor!=ct->texture||attachedDepth!=depth) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ct->texture,0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,depth);
+        attachedColor=ct->texture;attachedDepth=depth;attachmentsValid=true;
+        framebufferComplete=glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+    }
+    return framebufferComplete;
 }
 
 GLuint GLES3Device::Impl::Texture(Resource* r) {
@@ -355,54 +542,71 @@ GLuint GLES3Device::Impl::Texture(Resource* r) {
     DecodedTexture dt;
     if(r->format==0x24) {
         const u32 w=r->width&~1u,h=r->height;if(!w||!h||r->data.size()<size_t(w)*h*2)return white;
-        dt.width=w;dt.height=h;dt.levels.emplace_back(size_t(w)*h*4);
+        dt.width=w;dt.height=h;dt.levels.emplace_back(std::move(videoPixels));
+        dt.levels[0].resize(size_t(w)*h*4);
         auto& rgba=dt.levels[0];
         for(size_t i=0;i<size_t(w)*h;i+=2){const u8* s=r->data.data()+i*2;u8* d=rgba.data()+i*4;
             d[0]=s[0];d[1]=s[1];d[2]=s[3];d[3]=255;d[4]=s[2];d[5]=s[1];d[6]=s[3];d[7]=255;}
     } else {
         const auto* src=static_cast<const ni::NiObject*>(r->source);
         const auto* st=dynamic_cast<const ni::NiSourceTexture*>(src);
-        const bool xbox=r->levels&&!std::all_of(r->data.begin(),r->data.end(),[](u8 v){return v==0;})&&DecodeXboxTexels(*r,dt);
+        const bool xbox=r->levels&&(r->revision||!std::all_of(r->data.begin(),r->data.end(),[](u8 v){return v==0;}))&&DecodeXboxTexels(*r,dt);
         if(!xbox&&(!st||!st->pixelDataObj||!DecodePixelData(*st->pixelDataObj,dt))){NotPorted("texture without decodable pixel data (white)");return white;}
     }
     Tex& t=textures[r];if(!t.texture)glGenTextures(1,&t.texture);t.revision=r->revision;glBindTexture(GL_TEXTURE_2D,t.texture);
+    const bool storageChanged=t.width!=dt.width||t.height!=dt.height||t.levels!=dt.levels.size();
     u32 w=dt.width,h=dt.height;
     for(size_t level=0;level<dt.levels.size();++level,w=std::max(1u,w/2),h=std::max(1u,h/2)) {
         std::vector<u8> expanded;const u8* pixels=dt.levels[level].data();
         if(dt.kind!=DecodedTexture::Kind::RGBA8){expanded=ExpandBC(dt.levels[level],w,h,dt.kind);pixels=expanded.data();}
-        glTexImage2D(GL_TEXTURE_2D,level,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
+        if(storageChanged)glTexImage2D(GL_TEXTURE_2D,level,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
+        else glTexSubImage2D(GL_TEXTURE_2D,level,0,0,w,h,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
     }
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,dt.levels.size()-1);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    if(storageChanged) {
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,dt.levels.size()-1);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        t.width=dt.width;t.height=dt.height;t.levels=static_cast<u32>(dt.levels.size());
+    }
+    if(r->format==0x24)videoPixels=std::move(dt.levels[0]);
     return t.texture;
 }
 void GLES3Device::Impl::BindSampler(u32 stage,const u32* ts) {
+    const std::array<u32,8> state={ts[TSS_MINFILTER],ts[TSS_MAGFILTER],ts[TSS_MIPFILTER],
+        ts[TSS_ADDRESSU],ts[TSS_ADDRESSV],ts[TSS_ADDRESSW],ts[TSS_MAXMIPLEVEL],ts[TSS_BORDERCOLOR]};
+    if(!samplerValid[stage]||samplerState[stage]!=state) {
     const GLuint s=sampler[stage];const bool minL=ts[TSS_MINFILTER]>=2,magL=ts[TSS_MAGFILTER]>=2,mipL=ts[TSS_MIPFILTER]>=2;
-    const GLenum min=ts[TSS_MIPFILTER]==0?(minL?GL_LINEAR:GL_NEAREST):
+    const GLenum min=ts[TSS_MIPFILTER]==0?(minL?GL_LINEAR_MIPMAP_NEAREST:GL_NEAREST_MIPMAP_NEAREST):
         mipL?(minL?GL_LINEAR_MIPMAP_LINEAR:GL_NEAREST_MIPMAP_LINEAR):(minL?GL_LINEAR_MIPMAP_NEAREST:GL_NEAREST_MIPMAP_NEAREST);
     glSamplerParameteri(s,GL_TEXTURE_MIN_FILTER,min);glSamplerParameteri(s,GL_TEXTURE_MAG_FILTER,magL?GL_LINEAR:GL_NEAREST);
-    glSamplerParameteri(s,GL_TEXTURE_WRAP_S,Address(ts[TSS_ADDRESSU]));glSamplerParameteri(s,GL_TEXTURE_WRAP_T,Address(ts[TSS_ADDRESSV]));
-    glSamplerParameteri(s,GL_TEXTURE_WRAP_R,Address(ts[TSS_ADDRESSW]));
+    glSamplerParameteri(s,GL_TEXTURE_WRAP_S,Address(ts[TSS_ADDRESSU],borderClamp));glSamplerParameteri(s,GL_TEXTURE_WRAP_T,Address(ts[TSS_ADDRESSV],borderClamp));
+    glSamplerParameteri(s,GL_TEXTURE_WRAP_R,Address(ts[TSS_ADDRESSW],borderClamp));
+    if(borderClamp){f32 color[4];Color(ts[TSS_BORDERCOLOR],color);glSamplerParameterfv(s,kTextureBorderColor,color);}
     glSamplerParameterf(s,GL_TEXTURE_MIN_LOD,f32(ts[TSS_MAXMIPLEVEL]));
     glSamplerParameterf(s,GL_TEXTURE_MAX_LOD,ts[TSS_MIPFILTER]==0?f32(ts[TSS_MAXMIPLEVEL]):1000.0f);
-    if(ts[TSS_ADDRESSU]==4||ts[TSS_ADDRESSV]==4)NotPorted("texture border addressing uses clamp-to-edge");
-    if(ts[TSS_MIPMAPLODBIAS])NotPorted("sampler MIPMAPLODBIAS");
-    glBindSampler(stage,s);
+        samplerState[stage]=state;samplerValid[stage]=true;
+    }
+    if(!borderClamp&&(ts[TSS_ADDRESSU]==4||ts[TSS_ADDRESSV]==4))NotPorted("texture border addressing unavailable on this GPU; uses clamp-to-edge");
+    glBindSampler(stage,sampler[stage]);
 }
 
 void GLES3Device::Clear(u32 count,const D3DRECT* rects,u32 flags,u32 color,f32 z,u32 stencil) {
     XD3DDevice::Clear(count,rects,flags,color,z,stencil);Impl& d=*impl_;if(d.context==EGL_NO_CONTEXT||!d.BindTarget(renderTarget,depthStencil))return;
     const Impl::Target* ct=d.ColorTarget(renderTarget);f32 c[4];Color(color,c);glClearColor(c[0],c[1],c[2],c[3]);glClearDepthf(z);glClearStencil(stencil);
+    const float sx=float(ct->width)/std::max(renderTarget->width,1u),sy=float(ct->height)/std::max(renderTarget->height,1u);
     const u32 mask=flags&0xF0;glColorMask(mask&0x10,mask&0x20,mask&0x40,mask&0x80);glDepthMask(GL_TRUE);glStencilMask(0xFF);
     GLbitfield bits=(mask?GL_COLOR_BUFFER_BIT:0)|((flags&1)?GL_DEPTH_BUFFER_BIT:0)|((flags&2)?GL_STENCIL_BUFFER_BIT:0);
     D3DRECT viewportRect{s32(viewport.X),s32(viewport.Y),s32(viewport.X+viewport.Width),s32(viewport.Y+viewport.Height)};
     glEnable(GL_SCISSOR_TEST);
     for(u32 i=0;i<(count&&rects?count:1u);++i){const auto& r=count&&rects?rects[i]:viewportRect;
-        glScissor(r.x1,s32(ct->height)-r.y2,std::max(0,r.x2-r.x1),std::max(0,r.y2-r.y1));glClear(bits);}
+        glScissor(s32(std::lround(r.x1*sx)),s32(ct->height)-s32(std::lround(r.y2*sy)),
+                  std::max(0,s32(std::lround((r.x2-r.x1)*sx))),std::max(0,s32(std::lround((r.y2-r.y1)*sy))));glClear(bits);}
     glDisable(GL_SCISSOR_TEST);
 }
 void GLES3Device::Swap(u32 flags) {
-    XD3DDevice::Swap(flags);Impl& d=*impl_;if(!d.window||d.context==EGL_NO_CONTEXT)return;
+    XD3DDevice::Swap(flags);Impl& d=*impl_;
+    // Complete the bank's consumer list before a subsequent frame can reclaim its storage.
+    if(d.context!=EGL_NO_CONTEXT)d.SealBank();
+    if(!d.window||d.context==EGL_NO_CONTEXT)return;
     Impl::Target* t=d.ColorTarget(backBuffer());if(!t)return;
     EGLint w=0,h=0;eglQuerySurface(d.display,d.surface,EGL_WIDTH,&w);eglQuerySurface(d.display,d.surface,EGL_HEIGHT,&h);if(w<=0||h<=0)return;
     glBindFramebuffer(GL_FRAMEBUFFER,0);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_STENCIL_TEST);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);
@@ -552,6 +756,7 @@ void GLES3Device::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     GLuint srv[4] = {};
     for (u32 s = 0; s < 4; ++s) {
         const u32* ts = textureState[s];
+        cb.lodBias[s]=AsFloat(ts[TSS_MIPMAPLODBIAS]);
         const u32 tci = ts[TSS_TEXCOORDINDEX], ttf = ts[TSS_TEXTURETRANSFORMFLAGS];
         cb.tci[s][0] = s32(tci & 0xFFFF), cb.tci[s][1] = s32((tci >> 16) & 0xF);
         if ((tci >> 16) > 3) NotPorted("texture-coordinate generation mode above 3");
@@ -594,14 +799,12 @@ void GLES3Device::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     }
     cb.lightCount[0] = s32(nl);
     cb.ssOffset[2]=AsFloat(rs[RS_POINTSIZE]);
-    glBindBuffer(GL_UNIFORM_BUFFER,d.ubo);
-    glBufferData(GL_UNIFORM_BUFFER,sizeof cb,&cb,GL_STREAM_DRAW);
-    glBindBufferBase(GL_UNIFORM_BUFFER,0,d.ubo);
-
     // GLES state and submission. Viewport Y is inverted relative to D3D; clip Z was converted in the VS.
     if(!d.BindTarget(renderTarget,depthStencil))return;
     const Impl::Target* ct=d.ColorTarget(renderTarget);
-    glViewport(viewport.X,s32(ct->height)-s32(viewport.Y+viewport.Height),viewport.Width,viewport.Height);
+    const float sx=float(ct->width)/std::max(renderTarget->width,1u),sy=float(ct->height)/std::max(renderTarget->height,1u);
+    glViewport(s32(std::lround(viewport.X*sx)),s32(ct->height)-s32(std::lround((viewport.Y+viewport.Height)*sy)),
+               s32(std::lround(viewport.Width*sx)),s32(std::lround(viewport.Height*sy)));
     glDepthRangef(viewport.MinZ,viewport.MaxZ);glDisable(GL_SCISSOR_TEST);
     Enable(GL_BLEND,rs[RS_ALPHABLENDENABLE]!=0);const GLenum sb=Blend(rs[RS_SRCBLEND]),db=Blend(rs[RS_DESTBLEND]);
     glBlendFuncSeparate(sb,db,AlphaBlend(sb),AlphaBlend(db));
@@ -644,13 +847,20 @@ void GLES3Device::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
         }
         if(!flat.empty())d.idx=std::move(flat);
     }
-    glUseProgram(d.program);glBindVertexArray(d.vao);
-    glBindBuffer(GL_ARRAY_BUFFER,d.vbo);glBufferData(GL_ARRAY_BUFFER,d.verts.size()*sizeof(CVertex),d.verts.data(),GL_STREAM_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,d.ibo);glBufferData(GL_ELEMENT_ARRAY_BUFFER,d.idx.size()*sizeof(u32),d.idx.data(),GL_STREAM_DRAW);
+    // Reserve all three ranges together. A bank must never be fenced between a draw's uploads and its submission.
+    Impl::StreamBank& bank=d.PrepareDraw(d.verts.size()*sizeof(CVertex),d.idx.size()*sizeof(u32),sizeof cb);
+    glUseProgram(d.program);glBindVertexArray(bank.vao);
+    const size_t uniformOffset=d.Upload(GL_UNIFORM_BUFFER,bank.uniform,&cb,sizeof cb,d.uniformAlignment);
+    glBindBufferRange(GL_UNIFORM_BUFFER,0,bank.uniform.name,static_cast<GLintptr>(uniformOffset),sizeof cb);
+    const size_t vertexOffset=d.Upload(GL_ARRAY_BUFFER,bank.vertex,d.verts.data(),
+                                      d.verts.size()*sizeof(CVertex),sizeof(CVertex));
+    const u32 vertexBase=static_cast<u32>(vertexOffset/sizeof(CVertex));
+    for(u32& index:d.idx)index+=vertexBase;
+    const size_t indexOffset=d.Upload(GL_ELEMENT_ARRAY_BUFFER,bank.index,d.idx.data(),d.idx.size()*sizeof(u32),alignof(u32));
     const Resource* currentTarget=renderTarget&&renderTarget->parent?renderTarget->parent:renderTarget;
     for(u32 s=0;s<4;++s) {glActiveTexture(GL_TEXTURE0+s);GLuint tex=srv[s]?srv[s]:d.white;
         if(textures[s]&&textures[s]==currentTarget)tex=d.white; // avoid undefined feedback from the active framebuffer
         glBindTexture(GL_TEXTURE_2D,tex);if(!textures[s])glBindSampler(s,0);}
-    glDrawElements(topo,d.idx.size(),GL_UNSIGNED_INT,nullptr);++draws_;
+    glDrawElements(topo,d.idx.size(),GL_UNSIGNED_INT,reinterpret_cast<void*>(indexOffset));++draws_;
 }
 }

@@ -2,6 +2,7 @@
 // read-only Ghidra copy; the integer logic only), the generators' x87 orders the disassembly's
 // (renderer_lighting_port.md 4.5).
 #include "render/nixbox/NiXBoxTexturePipeline.h"
+#include "render/TextureDecode.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -72,7 +73,45 @@ s32 D3DFormatOf(const ni::NiPixelData::Format& f) {
 
 bool PowerOfTwo(u32 v) { return v && !(v & (v - 1)); }   // (0x0015E120: the lowest set bit is the only one)
 
+bool CanonicalPixelFormat(const ni::NiPixelData& p, u32 format) {
+    std::array<u32, 4> masks{};
+    u32 bits = 16;
+    switch (format) {
+    case 2: masks = {0x7C00, 0x03E0, 0x001F, 0x8000}; break;
+    case 3: masks = {0x7C00, 0x03E0, 0x001F, 0}; break;
+    case 4: masks = {0x0F00, 0x00F0, 0x000F, 0xF000}; break;
+    case 5: masks = {0xF800, 0x07E0, 0x001F, 0}; break;
+    case 6: masks = {0xFF0000, 0xFF00, 0xFF, 0xFF000000u}; bits = 32; break;
+    case 7: masks = {0xFF0000, 0xFF00, 0xFF, 0}; bits = 32; break;
+    default: return false;
+    }
+    return p.format.bitsPerPixel == bits && p.bytesPerPixel == bits / 8 &&
+           std::equal(masks.begin(), masks.end(), p.format.channelMasks);
+}
+
+// Validate the swizzler's dimensions and byte ranges before writing any mip. This also keeps a truncated
+// level from borrowing texels from the following mip. BC/paletted formats retain their original copy path.
+bool ValidUncompressedLevels(const ni::NiPixelData& p) {
+    const u32 stride = p.bytesPerPixel ? p.bytesPerPixel : p.format.bitsPerPixel / 8;
+    if (stride < p.format.bitsPerPixel / 8 || stride > 4 || !stride) return false;
+    u32 w = p.mips[0].width, h = p.mips[0].height;
+    for (size_t i = 0; i < p.mips.size(); ++i, w = std::max(1u, w / 2), h = std::max(1u, h / 2)) {
+        const auto& m = p.mips[i];
+        const size_t end = i + 1 < p.mips.size() ? p.mips[i + 1].offset : p.pixels.size();
+        if (m.width != w || m.height != h || end > p.pixels.size() || m.offset > end ||
+            uint64_t(w) * h > (end - m.offset) / stride) return false;
+    }
+    return true;
+}
+
 }  // namespace
+
+NiXBoxTextureManager::~NiXBoxTextureManager() {
+    for (const auto& [texture, resource] : textures_) {
+        if (resource) resource->source = nullptr;
+        d3d_.Release(resource);
+    }
+}
 
 void NiXBoxTextureManager::CreateDefaultPixelData() {   // orig: 0x0014ABE0
     auto* p = new ni::NiPixelData;                    // new(0x4C) 0x001112F0(8, 8, renderer +0x598, 1)
@@ -110,6 +149,38 @@ bool NiXBoxTextureManager::Precache(ni::NiSourceTexture& texture) {   // orig: 0
         fmt = D3DFormatOf(pix->format);
     }
     if (pix->palette != ni::kNullLink) NotPorted("NiXBoxTextureManager::Precache: the palette 0x0015DFF0");
+    std::unique_ptr<ni::NiPixelData> converted;
+    if (pix->format.format == 0 || pix->format.format == 1) {
+        if (!ValidUncompressedLevels(*pix)) return false;
+        if (!CanonicalPixelFormat(*pix, u32(fmt))) {
+            // Copying source bytes as the chosen Xbox format loses RGB24 stride and noncanonical masks.
+            // Keep the usual 16/32-bit formats allocation-free; convert exceptional layouts to A8R8G8B8.
+            DecodedTexture rgba;
+            if (!DecodePixelData(*pix, rgba) || rgba.levels.size() != pix->mips.size()) return false;
+            converted = std::make_unique<ni::NiPixelData>();
+            converted->format.format = 1;
+            converted->format.bitsPerPixel = 32;
+            converted->bytesPerPixel = 4;
+            const u32 masks[] = {0xFF0000, 0xFF00, 0xFF, 0xFF000000u};
+            std::copy(std::begin(masks), std::end(masks), converted->format.channelMasks);
+            for (size_t i = 0; i < rgba.levels.size(); ++i) {
+                const auto& level = rgba.levels[i];
+                const auto& m = pix->mips[i];
+                const size_t begin = converted->pixels.size();
+                if (begin > UINT32_MAX || level.size() > UINT32_MAX - begin) return false;
+                converted->mips.push_back({m.width, m.height, u32(begin)});
+                converted->pixels.resize(begin + level.size());
+                for (size_t at = 0; at < level.size(); at += 4) {
+                    converted->pixels[begin + at] = level[at + 2];
+                    converted->pixels[begin + at + 1] = level[at + 1];
+                    converted->pixels[begin + at + 2] = level[at];
+                    converted->pixels[begin + at + 3] = level[at + 3];
+                }
+            }
+            pix = converted.get();
+            fmt = 6;
+        }
+    }
     // (+0x54 the mipmap flag: the preferences' mipmap 1, or 2 with DAT_0030F024 (0); the converter's vf10 0x00151540
     // returns the pixel data itself for the same format: its levels are the texture's)
     const u32 w = pix->mips[0].width, h = pix->mips[0].height, levels = u32(pix->mips.size());
@@ -174,9 +245,9 @@ void NiXBoxTextureManager::Purge(const ni::NiTexture& texture) {
 
 void NiXBoxTextureManager::Replace(const ni::NiTexture& texture, Resource* d3d) {
     Resource*& slot = textures_[&texture];
+    if (d3d) d3d_.AddRef(d3d);                        // acquire first: replacing with itself must remain live
     if (slot) d3d_.Release(slot);                     // D3DResource_Release (+0x3C; the texture cache off: 0x0030EE74)
     slot = d3d;
-    if (d3d) d3d_.AddRef(d3d);                        // D3DResource_AddRef
 }
 
 bool NiXBoxTextureManager::Prepare(ni::NiObject* texture, Resource*& d3d, bool& set, bool& mips) {

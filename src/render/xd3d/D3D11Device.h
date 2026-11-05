@@ -47,6 +47,7 @@ private:
     std::unique_ptr<Impl> impl_;
     u32 draws_ = 0;
     void Draw(u32 primitive, const u16* list, u32 count, u32 start);
+    void OnResourceReleased(Resource* r) override;
 };
 
 }  // namespace fut::render::xd3d

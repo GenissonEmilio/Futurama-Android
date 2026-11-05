@@ -4,6 +4,7 @@
 // expanded to RGBA8 from the channel masks; DXT levels are passed through as BC1 / BC2 blocks. Pixel data is stored
 // linear, rows top to bottom (checked on the font atlases: Morton deswizzling scrambles them), so the original must
 // swizzle at texture creation.
+// RGB/RGBA 24-bit data and noncanonical contiguous channel masks are also converted for runtime-created textures.
 #pragma once
 
 #include "core/Types.h"

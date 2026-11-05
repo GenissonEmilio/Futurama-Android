@@ -33,6 +33,7 @@ layout(std140) uniform Draw {
     ivec4 lightCount;
     Light lights[8];
     vec4 texScale[4];   // uv scale (a linear texture's texel coordinates: 1.0 / size), z: the YUV conversion
+    vec4 lodBias;
 };
 struct VSIn {
     vec4 pos; vec4 nrm; vec4 d0; vec4 d1;
@@ -227,6 +228,7 @@ layout(std140) uniform Draw {
     ivec4 lightCount;
     Light lights[8];
     vec4 texScale[4];   // uv scale (a linear texture's texel coordinates: 1.0 / size), z: the YUV conversion
+    vec4 lodBias;
 };
 struct VSIn {
     vec4 pos; vec4 nrm; vec4 d0; vec4 d1;
@@ -304,10 +306,10 @@ vec4 Sample(int s, vec4 t) {
     uv *= texScale[s].xy;
     if (texScale[s].w > 0.5) uv.y=1.0-uv.y;
     vec4 c;
-    if (s == 0) c = texture(tex0, uv);
-    else if (s == 1) c = texture(tex1, uv);
-    else if (s == 2) c = texture(tex2, uv);
-    else c = texture(tex3, uv);
+    if (s == 0) c = texture(tex0, uv, lodBias[0]);
+    else if (s == 1) c = texture(tex1, uv, lodBias[1]);
+    else if (s == 2) c = texture(tex2, uv, lodBias[2]);
+    else c = texture(tex3, uv, lodBias[3]);
     return texScale[s].z > 0.5 ? YuvToRgb(c) : c;
 }
 

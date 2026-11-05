@@ -4,9 +4,17 @@ Port nativo experimental para Android do [Futurama: The Game: The Recomp](https:
 
 Você precisa da sua própria ISO de **Futurama para Xbox**, NTSC-U ou PAL. Os dados do jogo não são incluídos no código nem no APK. A imagem de PS2 não é compatível.
 
+[Baixar APK assinado 0.2.0](https://github.com/GenissonEmilio/Futurama-Android/releases/tag/v0.2.0) · [Relatório de validação](docs/RELEASE_0.2.0.md)
+
 ## Estado
 
 Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. O APK foi compilado e instalado em um Android ARM64: ISO, abertura, vídeos, menu, retorno do segundo plano e início jogável de Planet Express com movimento e câmera por toque foram verificados. A campanha completa ainda não foi validada; esta versão é experimental.
+
+A versão **0.2.0** (`versionCode 20`) usa o pacote público `com.genisson.futurama.android`. Ele é separado da instalação anterior, cuja assinatura não está disponível, para evitar sobrescrevê-la. A ISO importada e os saves permanecem nos dados privados de cada pacote; a instalação pública não migra esses dados automaticamente. O ícone original da nave tem camadas adaptive e PNGs nas densidades mdpi a xxxhdpi.
+
+O alvo principal renderiza por padrão com supersampling 2×, em **1280×960**, preservando as coordenadas lógicas de **640×480**. A versão inclui conversão de texturas de 24 bits e máscaras de canais, atualização correta de texturas com texels zerados, `MIPMAPLODBIAS`/`MAXMIPLEVEL` e borda nativa de sampler quando a GPU oferece a extensão; nas demais GPUs usa clamp-to-edge. Oito execuções de suítes nativas Android cobrem núcleo, saves, recursos, filesystem, conversão de texturas, GLES e rasterização, incluindo a variante raster com escala 2×. Esses testes não comprovam a campanha completa.
+
+A corrupção intermitente dos contornos/HUD foi corrigida com bancos de buffers protegidos por fences da GPU. O teste de 14.400 desenhos diferentes detecta a falha anterior e passa com a correção. O APK assinado mediu 58,1 FPS agregados numa coleta de 45 segundos em Planet Express no Adreno 810; consulte o relatório para as condições e os limites dessa medição.
 
 Consulte [a situação dos testes](docs/ANDROID_STATUS.md) e [a documentação original](docs/UPSTREAM_README.md).
 
@@ -34,9 +42,12 @@ Testes do núcleo em host Linux:
 
 ```sh
 cmake -S . -B build/tests -DFUT_BUILD_TESTS=ON
-cmake --build build/tests --target fut_portable_tests -j2
+cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests -j2
 ctest --test-dir build/tests --output-on-failure
 ```
+
+Os testes de saves, recursos, arquivos e GLES em aparelho, além do procedimento de
+medição de desempenho, estão em [ANDROID_VALIDATION.md](docs/ANDROID_VALIDATION.md).
 
 ## Organização
 

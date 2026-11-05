@@ -70,7 +70,12 @@ void NiXBoxRenderer::PurgeTexture(const ni::NiTexture& texture) {   // orig: 0x0
     if (textures_) textures_->Purge(texture);
     if (auto it = renderedTextures_.find(static_cast<const ni::NiRenderedTexture*>(&texture));
         it != renderedTextures_.end()) {
-        if (current_ == it->second.get()) current_ = &backBuffer_;   // (a UB guard: the target dies)
+        if (current_ == it->second.get()) {
+            d3d_.SetRenderTarget(backBuffer_.color, backBuffer_.depth);
+            current_ = &backBuffer_;                 // the active target must stop retaining its surfaces too
+        }
+        d3d_.Release(it->second->color);              // releases the surface's parent texture reference
+        d3d_.Release(it->second->depth);
         if (it->second->texture) d3d_.Release(it->second->texture);   // (the data's AddRef)
         renderedTextures_.erase(it);
     }
@@ -80,6 +85,19 @@ NiXBoxRenderer::~NiXBoxRenderer() {
     // (the groups go first: renderer data that outlives the renderer is left without a group, see ~NiXBoxGeometryGroup)
     for (auto& bucket : pending_) bucket.clear();
     groups_.clear();
+    for (u32 stage = 0; stage < kNumStages; ++stage) d3d_.SetTexture(stage, nullptr);
+    d3d_.SetStreamSource(0, nullptr, 0);
+    d3d_.SetIndices(nullptr, 0);
+    d3d_.SetRenderTarget(backBuffer_.color, backBuffer_.depth);
+    current_ = &backBuffer_;
+    for (auto& [texture, target] : renderedTextures_) {
+        d3d_.Release(target->color);
+        d3d_.Release(target->depth);
+        d3d_.Release(target->texture);
+    }
+    renderedTextures_.clear();
+    for (auto& slot : dynamic_) d3d_.Release(slot.vb);
+    d3d_.Release(quadIB_);
 }
 
 // ---- frame -----------------------------------------------------------------------------------------------------
@@ -160,6 +178,7 @@ bool NiXBoxRenderer::CreateRenderedTextureData(ni::NiRenderedTexture& texture) {
     textures_->rendered[&texture] = tex;              // (the texture manager's view of it: the stage apply binds it)
     // (+0x18 released and cleared, +0x1C = 0; the texture manager's registration 0x0015DA40: NOT PORTED, no D3D)
     renderedTextures_[&texture] = std::move(t);
+    d3d_.Release(tex);                                // transfer the creator's reference to the data/surface owners
     return true;
 }
 
