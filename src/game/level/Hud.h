@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fut::game {
@@ -32,6 +33,9 @@ namespace fut::game {
 class LevelData;
 struct HudTimer;
 class Hud;
+
+// Read-only, game-thread observation of hints the HUD currently displays. Views live only for the callback.
+using HudHintVisitor = void (*)(std::string_view id, std::u16string_view text, void* user);
 
 // orig: HUDObject (vtable 0x002A5118; base ctor 0x000E57F0(name): strncpy(+4, name, 16), +0x13 = 0, +0x15 = 1, +0x18 =
 // 0, inserted at the head of the HUD's list +4 (+0x1C next, +0x20 previous)).
@@ -44,6 +48,7 @@ public:
     virtual void Command(const char*, const char*) {} // vf03 (+0xC; 0x00011280: RET 8)
     virtual void Command(const char*, f32) {}         // vf04 (+0x10)
     virtual void SetActive(bool on) { active = on; }  // vf05 (+0x14; 0x000E5850)
+    virtual void VisitVisibleHints(HudHintVisitor, void*) const {}  // port: optional host controls overlay
     bool IsActive() const;                            // vf06 (+0x18; 0x000E58B0: +0x15 and the HUD's +0)
     Hud& hud;
     char name[16] = {};                               // +0x04
@@ -59,6 +64,7 @@ public:
     void Update();                                    // orig: 0x000E58E0 (each element's vf01, when +0 is set)
     void Draw();                                      // orig: 0x000E5900 (each element's vf02, when +0 is set)
     HudElement* Find(const char* name) const;         // orig: 0x000E5920 (strncmp, 15 characters)
+    void VisitVisibleHints(HudHintVisitor visitor, void* user) const;
     void SetActiveAll(bool on);                       // orig: 0x000E5A60 (each element's vf05)
     void SetActive(const char* name, bool on);        // orig: 0x000E5B60
     void Command(const char* name, const char* cmd, f32 v);           // orig: 0x000E5B90 (vf04)

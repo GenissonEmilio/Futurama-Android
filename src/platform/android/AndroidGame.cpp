@@ -2,6 +2,7 @@
 #include "platform/android/AndroidSoundBackend.h"
 #include "platform/android/MovieService.h"
 #include "platform/android/FrameProfiler.h"
+#include "platform/android/TouchHudState.h"
 #include "core/XbeImage.h"
 #include "core/fs/Vfs.h"
 #include "game/app/App.h"
@@ -13,6 +14,7 @@
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -20,6 +22,11 @@
 #include <vector>
 
 namespace fut::platform {
+namespace {
+// This snapshot outlives AndroidGame, so JNI polling never follows an engine pointer across threads.
+std::atomic<std::uint64_t> controlState{PackTouchHudState({})};
+}
+std::uint64_t AndroidControlState() { return controlState.load(std::memory_order_relaxed); }
 std::string ValidateAndroidDisc(const std::string& source) {
     fs::Vfs vfs;
     std::string error;
@@ -107,6 +114,7 @@ void AndroidGame::Run() {
         using Clock = std::chrono::steady_clock;
         auto previous = Clock::now();
         bool audioPaused = false;
+        TouchHudState hudState;
         std::vector<s32> droppedAudio;
         for (s32 frame = 0;;) {
             {
@@ -119,6 +127,11 @@ void AndroidGame::Run() {
                 }
                 const bool suspend = paused_ || !requestedWindow_;
                 if (suspend) {
+                    hudState.gameplay = false;
+                    hudState.nonGameplay = true;
+                    hudState.firstPerson = false;
+                    hudState.interaction = TouchHudInteraction::Generic;
+                    controlState.store(PackTouchHudState(hudState), std::memory_order_relaxed);
                     if (!audioPaused) { movies.SetPaused(true); backend.SetPaused(true); audioPaused = true; }
                     wake_.wait(lock, [&] { return stopping_ || applied_ != requested_ || (!paused_ && requestedWindow_); });
                     previous = Clock::now();
@@ -135,6 +148,8 @@ void AndroidGame::Run() {
             const unsigned previousDraws = device.draws();
             profiler.Begin();
             if (!app.Frame()) { message_("The game has finished. Reopen the app to play again.", false); break; }
+            hudState = CaptureTouchHudState(app);
+            controlState.store(PackTouchHudState(hudState), std::memory_order_relaxed);
             if (offline) { droppedAudio.clear(); backend.RenderFrames(25 * app.lastSteps, droppedAudio); }
             profiler.End(app.Current() ? app.Current()->name.c_str() : "",
                          app.CurrentLevel() ? app.CurrentLevel()->name.c_str() : app.LevelName(),
@@ -150,6 +165,7 @@ void AndroidGame::Run() {
     } catch (...) {
         message_("An unexpected native game error occurred. See Android logcat for details.", true);
     }
+    controlState.store(PackTouchHudState({}), std::memory_order_relaxed);
     { std::lock_guard<std::mutex> lock(mutex_); finished_ = true; }
     wake_.notify_all();
 }
@@ -209,3 +225,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_
 extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeKey(JNIEnv*, jobject, jint key, jboolean down) { if (game) game->input.Key(key, down); }
 extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeAxes(JNIEnv*, jobject, jfloat lx, jfloat ly, jfloat rx, jfloat ry, jfloat lt, jfloat rt, jfloat hx, jfloat hy) { if (game) game->input.Axes(lx, ly, rx, ry, lt, rt, hx, hy); }
 extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeTouch(JNIEnv*, jobject, jint buttons, jfloat lx, jfloat ly, jfloat rx, jfloat ry) { if (game) game->input.Touch(buttons, lx, ly, rx, ry); }
+extern "C" JNIEXPORT jlong JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeControlState(JNIEnv*, jobject) { return static_cast<jlong>(fut::platform::AndroidControlState()); }
+extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeLook(JNIEnv*, jobject, jfloat dx, jfloat dy) { if (game) game->input.Look(dx, dy); }
+extern "C" JNIEXPORT void JNICALL Java_com_genisson_futuramarecomp_MainActivity_nativeClearTouch(JNIEnv*, jobject) { if (game) game->input.ClearTouch(); }

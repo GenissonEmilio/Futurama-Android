@@ -3,6 +3,7 @@
 #include <jni.h>
 #include <android/native_window.h>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -30,4 +31,6 @@ private:
     bool paused_ = false, stopping_ = false, finished_ = false;
 };
 std::string ValidateAndroidDisc(const std::string& source);
+// Packed value only: safe for UI polling without reading App, LevelData or player objects.
+std::uint64_t AndroidControlState();
 }

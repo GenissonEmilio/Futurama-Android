@@ -12,8 +12,9 @@ android {
         manifestPlaceholders = [futuramaAppLabel: providers.gradleProperty('futuramaAppLabel').getOrElse('@string/app_name')]
         minSdk 26
         targetSdk 36
-        versionCode providers.gradleProperty('futuramaVersionCode').map { it as int }.getOrElse(20)
-        versionName providers.gradleProperty('futuramaVersionName').getOrElse('0.2.0')
+        testInstrumentationRunner 'com.genisson.futuramarecomp.TouchControlsInstrumentation'
+        versionCode providers.gradleProperty('futuramaVersionCode').map { it as int }.getOrElse(30)
+        versionName providers.gradleProperty('futuramaVersionName').getOrElse('0.3.0')
         ndk { abiFilters providers.gradleProperty('futuramaAbi').getOrElse('arm64-v8a') }
         if (prebuiltDir == null) {
             externalNativeBuild {

@@ -13,10 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Touch gesture regressions
+        run: python3 tools/run_touch_tests.py
       - name: Configure
         run: cmake -S . -B build/tests -DFUT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build portable core and tests
-        run: cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests -j2
+        run: cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests fut_AndroidInput_tests fut_TouchHudState_tests -j2
       - name: Run tests
         run: ctest --test-dir build/tests --output-on-failure
 

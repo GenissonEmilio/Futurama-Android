@@ -502,6 +502,17 @@ struct HudInfo : HudElement {
             if (crt::StrICmp(n, entries[i]->name.c_str()) == 0) return entries[i];
         return nullptr;
     }
+    void VisitVisibleHints(HudHintVisitor visitor, void* user) const override {
+        if (!visitor || !IsActive() || !shown || !object) return;
+        for (s32 i = 0; i < count; ++i) {
+            const Entry* e = entries[i];
+            if (!e || !e->handle || e->dead || e->refs <= 0) continue;
+            if (e->timer && e->timer[0] >= e->timer[1]) continue;
+            // An entry begins transparent; use the same fade expression as Show without changing its state.
+            if (!((1.0 - e->fade) * 1.25 + 1.0 / e->fade > 0.0)) continue;
+            visitor(e->name, e->text, user);
+        }
+    }
     // orig: vf01 0x000EA200 (+0x15 and entries): each entry's 0x000E9EE0; with any finished, those are deleted and
     // the kept ones moved to the front in their order.
     void Update() override {
@@ -1867,6 +1878,11 @@ HudElement* Hud::Find(const char* n) const {          // orig: 0x000E5920
     for (HudElement* e : elements)
         if (std::strncmp(n, e->name, 15) == 0) return e;
     return nullptr;
+}
+
+void Hud::VisitVisibleHints(HudHintVisitor visitor, void* user) const {
+    if (!enabled || !visitor) return;
+    if (const HudElement* info = Find("info")) info->VisitVisibleHints(visitor, user);
 }
 
 void Hud::SetActiveAll(bool on) {                     // orig: 0x000E5A60

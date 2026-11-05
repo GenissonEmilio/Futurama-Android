@@ -2,6 +2,16 @@
 
 Atualizado em 05/11/2026. Compilar um backend não comprova equivalência com o Xbox.
 
+## Versão 0.3.0 — controles
+
+- Interface por personagem real: Fry, Bender, Leela e Zoidberg; sem alternador de personagens. Ícones vetoriais e comandos originais preservados, incluindo especial A+X.
+- Câmera por arrasto relativo com sensibilidade/inversão salvas; compensação de primeira pessoa e correção das deadzones para movimentos lentos.
+- Y contextual pelos avisos efetivamente visíveis do HUD. Porta/mecanismo/Interagir, com fallback genérico onde não há semântica confiável.
+- Dez execuções nativas passaram no aparelho, mais 193 verificações Java e 71 verificações com MotionEvents Android. Os quatro perfis, câmera horizontal/vertical, primeira pessoa e pausa foram inspecionados no celular.
+- APK assinado instalado como atualização da versão 0.2.0; ISO local reaproveitada. Ocultar/mostrar controles, ajustes de câmera e HOME/retorno verificados, com o mesmo processo de jogo e sem erro EGL/nativo observado.
+- Coleta de 45 segundos no APK assinado, Planet Express parado e alvo 1280×960: 58,0 FPS agregados e CPU média de 13,6 ms/frame. A versão 0.2.0 mediu 58,1 FPS nessa cena; as amostras curtas não isolam o custo de cada alteração nem representam toda a campanha.
+- [Guia dos controles](TOUCH_CONTROLS.md). As validações são de trechos curtos, sem conclusão da campanha.
+
 ## Versão 0.2.0
 
 - Versão pública `0.2.0`, `versionCode 20`, pacote `com.genisson.futurama.android`. O pacote separado preserva a instalação anterior, cuja assinatura não está disponível; ISO e saves privados não são migrados automaticamente entre os pacotes.
@@ -25,7 +35,7 @@ Atualizado em 05/11/2026. Compilar um backend não comprova equivalência com o 
 - Comparação curta de Planet Express: 12,5 para 53,1 FPS agregados no mesmo ponto, após substituir uploads por draw por arenas de streaming; não representa a campanha inteira.
 - APK Debug de validação: gameplay 3D, movimento e câmera por toque, HOME/retorno com o mesmo processo de jogo e sem erro EGL/nativo observado.
 
-Validação do APK público: [RELEASE_0.2.0.md](RELEASE_0.2.0.md).
+Validação do APK público atual: [RELEASE_0.3.0.md](RELEASE_0.3.0.md); histórico: [RELEASE_0.2.0.md](RELEASE_0.2.0.md).
 Procedimentos, limites e resultados anteriores: [ANDROID_VALIDATION.md](ANDROID_VALIDATION.md).
 
 ## Implementação

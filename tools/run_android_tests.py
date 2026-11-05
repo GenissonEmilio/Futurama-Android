@@ -15,6 +15,7 @@ def main():
     adb = [args.adb] + (['-s', args.serial] if args.serial else [])
     suites = ['fut_portable_tests', 'fut_SaveStorage_tests', 'fut_ResourceLifetime_tests',
               'fut_FilesystemSafety_tests', 'fut_TextureConversion_tests',
+              'fut_AndroidInput_tests', 'fut_TouchHudState_tests',
               'fut_android_gles_tests', 'fut_android_raster_tests']
     files = [args.build_dir / name for name in suites]
     files += [args.build_dir / 'libfuturama_android.so', args.libcxx]

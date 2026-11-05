@@ -4,17 +4,19 @@ Port nativo experimental para Android do [Futurama: The Game: The Recomp](https:
 
 Você precisa da sua própria ISO de **Futurama para Xbox**, NTSC-U ou PAL. Os dados do jogo não são incluídos no código nem no APK. A imagem de PS2 não é compatível.
 
-[Baixar APK assinado 0.2.0](https://github.com/GenissonEmilio/Futurama-Android/releases/tag/v0.2.0) · [Relatório de validação](docs/RELEASE_0.2.0.md)
+[Baixar APK assinado 0.3.0](https://github.com/GenissonEmilio/Futurama-Android/releases/tag/v0.3.0) · [Controles por toque](docs/TOUCH_CONTROLS.md)
 
 ## Estado
 
 Implementados launcher com seletor de ISO, integração JNI, controles por toque/controle físico, renderização OpenGL ES 3 e áudio AAudio sobre o pipeline original de VP/DSP. O APK foi compilado e instalado em um Android ARM64: ISO, abertura, vídeos, menu, retorno do segundo plano e início jogável de Planet Express com movimento e câmera por toque foram verificados. A campanha completa ainda não foi validada; esta versão é experimental.
 
-A versão **0.2.0** (`versionCode 20`) usa o pacote público `com.genisson.futurama.android`. Ele é separado da instalação anterior, cuja assinatura não está disponível, para evitar sobrescrevê-la. A ISO importada e os saves permanecem nos dados privados de cada pacote; a instalação pública não migra esses dados automaticamente. O ícone original da nave tem camadas adaptive e PNGs nas densidades mdpi a xxxhdpi.
+A versão **0.3.0** (`versionCode 30`) acrescenta controles por personagem, câmera por arrasto, botões contextuais pelos avisos reais do jogo e ajustes de sensibilidade/inversão. Não há botão para alternar personagens. [Guia e testes](docs/TOUCH_CONTROLS.md).
 
-O alvo principal renderiza por padrão com supersampling 2×, em **1280×960**, preservando as coordenadas lógicas de **640×480**. A versão inclui conversão de texturas de 24 bits e máscaras de canais, atualização correta de texturas com texels zerados, `MIPMAPLODBIAS`/`MAXMIPLEVEL` e borda nativa de sampler quando a GPU oferece a extensão; nas demais GPUs usa clamp-to-edge. Oito execuções de suítes nativas Android cobrem núcleo, saves, recursos, filesystem, conversão de texturas, GLES e rasterização, incluindo a variante raster com escala 2×. Esses testes não comprovam a campanha completa.
+Desde a versão 0.2.0, o pacote público é `com.genisson.futurama.android`, separado da instalação anterior cuja assinatura não está disponível. A ISO importada e os saves permanecem nos dados privados de cada pacote; esses dados não são migrados automaticamente entre pacotes. Atualizar o APK público 0.2.0 para 0.3.0 mantém seu pacote e assinatura. O ícone original da nave tem camadas adaptive e PNGs nas densidades mdpi a xxxhdpi.
 
-A corrupção intermitente dos contornos/HUD foi corrigida com bancos de buffers protegidos por fences da GPU. O teste de 14.400 desenhos diferentes detecta a falha anterior e passa com a correção. O APK assinado mediu 58,1 FPS agregados numa coleta de 45 segundos em Planet Express no Adreno 810; consulte o relatório para as condições e os limites dessa medição.
+O alvo principal renderiza por padrão com supersampling 2×, em **1280×960**, preservando as coordenadas lógicas de **640×480**. A versão inclui conversão de texturas de 24 bits e máscaras de canais, atualização correta de texturas com texels zerados, `MIPMAPLODBIAS`/`MAXMIPLEVEL` e borda nativa de sampler quando a GPU oferece a extensão; nas demais GPUs usa clamp-to-edge. Dez execuções de suítes nativas Android cobrem núcleo, saves, recursos, filesystem, texturas, entrada, estado do HUD, GLES e rasterização, incluindo a variante raster com escala 2×. Esses testes não comprovam a campanha completa.
+
+A corrupção intermitente dos contornos/HUD foi corrigida com bancos de buffers protegidos por fences da GPU. O teste de 14.400 desenhos diferentes detecta a falha anterior e passa com a correção. O APK assinado 0.3.0 mediu 58,0 FPS agregados numa coleta de 45 segundos em Planet Express no Adreno 810, próximo dos 58,1 FPS da versão 0.2.0. Consulte [o relatório](docs/RELEASE_0.3.0.md) para as condições e os limites dessa medição.
 
 Consulte [a situação dos testes](docs/ANDROID_STATUS.md) e [a documentação original](docs/UPSTREAM_README.md).
 
@@ -24,7 +26,7 @@ Consulte [a situação dos testes](docs/ANDROID_STATUS.md) e [a documentação o
 - Espaço livre para uma cópia da ISO nos dados do aplicativo.
 - Abra o app, selecione sua ISO de Xbox e aguarde a importação e validação. O app reutiliza a cópia local nas próximas aberturas.
 - Os saves ficam nos dados privados do aplicativo. Desinstalar o app apaga esses dados.
-- Controles na tela: dois analógicos, direcional, A/B/X/Y, gatilhos e Start/Back. Controles físicos Android também são aceitos.
+- Controles na tela: analógico de movimento, câmera por arrasto e botões por personagem/contexto. Pausa e ajustes ficam nos cantos superiores. Controles físicos Android também são aceitos.
 
 ## Compilar
 
@@ -42,8 +44,9 @@ Testes do núcleo em host Linux:
 
 ```sh
 cmake -S . -B build/tests -DFUT_BUILD_TESTS=ON
-cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests -j2
+cmake --build build/tests --target fut_portable_tests fut_SaveStorage_tests fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests fut_AndroidInput_tests fut_TouchHudState_tests -j2
 ctest --test-dir build/tests --output-on-failure
+python3 tools/run_touch_tests.py
 ```
 
 Os testes de saves, recursos, arquivos e GLES em aparelho, além do procedimento de

@@ -1,9 +1,11 @@
 # Regressões de saves, memória, gráficos e desempenho
 
-A validação do APK público 0.2.0 é registrada em [RELEASE_0.2.0.md](RELEASE_0.2.0.md).
+A validação do APK público atual é registrada em [RELEASE_0.3.0.md](RELEASE_0.3.0.md).
+Os controles e testes de gestos estão em [TOUCH_CONTROLS.md](TOUCH_CONTROLS.md).
+O relatório gráfico anterior permanece em [RELEASE_0.2.0.md](RELEASE_0.2.0.md).
 As medições abaixo são o histórico da primeira rodada de otimização a 640×480.
 
-## Execução local (05/11/2026)
+## Execução local inicial (05/11/2026)
 
 As cinco suítes nativas foram compiladas com NDK 30.0.16248370, CMake 3.31.6,
 ARM64/API 26, RelWithDebInfo, e executadas no aparelho Android API 36 conectado.
@@ -26,7 +28,10 @@ Não precisam de ISO ou de outros dados comerciais.
 As suítes de saves e filesystem também passaram com AddressSanitizer e
 UndefinedBehaviorSanitizer no aparelho (`detect_leaks=0`; LeakSanitizer não foi usado).
 
-O CI Linux executa as cinco suítes portáteis, incluindo `TextureConversion`.
+## Procedimento atual
+
+O CI Linux executa sete suítes portáteis, incluindo `TextureConversion`,
+`AndroidInput` e `TouchHudState`, além dos testes Java de gestos.
 Os testes GLES e raster requerem Android.
 Exemplo, após configurar `SDK` para o SDK Android local:
 
@@ -37,6 +42,7 @@ cmake -S . -B build/android-tests -G Ninja \
   -DANDROID_STL=c++_shared -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFUT_BUILD_TESTS=ON
 cmake --build build/android-tests --target fut_portable_tests fut_SaveStorage_tests \
   fut_ResourceLifetime_tests fut_FilesystemSafety_tests fut_TextureConversion_tests \
+  fut_AndroidInput_tests fut_TouchHudState_tests \
   fut_android_gles_tests fut_android_raster_tests -j4
 python tools/run_android_tests.py --build-dir build/android-tests \
   --libcxx "$SDK/ndk/30.0.16248370/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
@@ -45,7 +51,14 @@ python tools/run_android_tests.py --build-dir build/android-tests \
 No Windows, os executáveis do CMake/Ninja estão em `SDK/cmake/3.31.6/bin`.
 O script aceita `--adb` e `--serial`. Ele usa exclusivamente
 `/data/local/tmp/futurama-tests`; os saves instalados não são tocados.
-São oito execuções: os sete executáveis e a variante raster `--scaled`.
+São dez execuções: os nove executáveis e a variante raster `--scaled`.
+`AndroidInput` cobre deltas da câmera, sinais/deadzones, consumo único,
+concorrência e preservação do controle físico ao limpar o toque.
+`TouchHudState` cobre os perfis, bloqueios de gameplay e o ciclo real de avisos
+HUD com fontes e strings sintéticas. Rode também `python tools/run_touch_tests.py`
+com JDK 17. Para MotionEvents reais, compile `assembleDebugAndroidTest` e execute
+o runner `com.genisson.futuramarecomp.TouchControlsInstrumentation` no aparelho;
+use o applicationId de validação para manter essa instalação separada.
 `TextureConversion` usa texels e metadados XBE sintéticos, sem dados comerciais.
 Os testes raster conferem pixels de depth, alpha, culling, render-to-texture,
 texels zerados, mips, LOD bias e borda nativa. Também verificam os conectores

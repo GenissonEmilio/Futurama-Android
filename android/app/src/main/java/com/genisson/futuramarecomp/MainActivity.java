@@ -4,14 +4,11 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.database.Cursor;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.StatFs;
 import android.provider.OpenableColumns;
-import android.util.SparseIntArray;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -24,9 +21,11 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -58,7 +57,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private ProgressBar progress;
     private Button choose, play;
     private SurfaceView surface;
-    private Controls controls;
+    private TouchControlsView controls;
     private File disc;
     private boolean ready, started, resumed, surfaceReady, busy, openingGame;
 
@@ -70,6 +69,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private native void nativeKey(int key, boolean down);
     private native void nativeAxes(float lx, float ly, float rx, float ry, float lt, float rt, float hx, float hy);
     private native void nativeTouch(int buttons, float lx, float ly, float rx, float ry);
+    private native void nativeLook(float dx, float dy);
+    private native void nativeClearTouch();
+    private native long nativeControlState();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -212,25 +214,53 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         launcher.setVisibility(View.GONE);
         surface = new SurfaceView(this); surface.getHolder().addCallback(this);
         root.addView(surface, new FrameLayout.LayoutParams(-1, -1));
-        controls = new Controls(); root.addView(controls, new FrameLayout.LayoutParams(-1, -1));
-        Button menu = new Button(this); menu.setText("⋮"); menu.setContentDescription("Game controls and disc options");
-        FrameLayout.LayoutParams menuLayout = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        root.addView(menu, menuLayout); menu.setOnClickListener(v -> gameMenu());
+        controls = new TouchControlsView(this, new TouchControlsView.Sink() {
+            public boolean running() { return started && resumed; }
+            public long state() { return nativeControlState(); }
+            public void touch(int buttons, float lx, float ly) { nativeTouch(buttons,lx,ly,0,0); }
+            public void look(float dx, float dy) { nativeLook(dx,dy); }
+            public void clearTouch() { nativeClearTouch(); }
+            public void settings() { gameMenu(); }
+        });
+        controls.loadCameraOptions();
+        root.addView(controls, new FrameLayout.LayoutParams(-1, -1));
         gameStatus = text("Starting native game…", 14);
         FrameLayout.LayoutParams statusLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         statusLayout.setMargins(dp(16), dp(8), dp(16), 0); root.addView(gameStatus, statusLayout);
     }
     private void gameMenu() {
         nativePause(true); controls.clear();
-        String[] items = {"Resume", controls.getVisibility() == View.VISIBLE ? "Hide touch controls" : "Show touch controls", "Change disc image", "Exit"};
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Futurama Recompiled").setItems(items, (d, which) -> {
-            if (which == 1) controls.setVisibility(controls.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
-            if (which == 2) {
+        final boolean[] cameraDialog = {false};
+        String[] items = {"Continuar", controls.touchVisible() ? "Ocultar controles" : "Mostrar controles", "Ajustar câmera", "Trocar imagem do disco", "Sair"};
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Futurama Android").setItems(items, (d, which) -> {
+            if (which == 1) controls.setTouchVisible(!controls.touchVisible());
+            if (which == 2) { cameraDialog[0] = true; cameraOptions(); }
+            if (which == 3) {
                 startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra("pickDisc", true));
                 finish();
             }
-            if (which == 3) finish();
+            if (which == 4) finish();
         }).create();
+        dialog.setOnDismissListener(d -> { if (!cameraDialog[0] && started && resumed) nativePause(false); immersive(); }); dialog.show();
+    }
+    private void cameraOptions() {
+        LinearLayout options = new LinearLayout(this); options.setOrientation(LinearLayout.VERTICAL);
+        options.setPadding(dp(22), dp(12), dp(22), dp(12));
+        TextView sensitivity = new TextView(this);
+        SeekBar slider = new SeekBar(this); slider.setMax(165); slider.setProgress(Math.round((controls.sensitivity()-.35f)*100));
+        sensitivity.setText(String.format(java.util.Locale.getDefault(), "Sensibilidade: %.2f×", controls.sensitivity()));
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int value, boolean user) { sensitivity.setText(String.format(java.util.Locale.getDefault(), "Sensibilidade: %.2f×", .35f+value/100f)); }
+            public void onStartTrackingTouch(SeekBar bar) {}
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        CheckBox horizontal = new CheckBox(this); horizontal.setText("Inverter horizontal"); horizontal.setChecked(controls.invertX());
+        CheckBox vertical = new CheckBox(this); vertical.setText("Inverter vertical"); vertical.setChecked(controls.invertY());
+        options.addView(sensitivity); options.addView(slider); options.addView(horizontal); options.addView(vertical);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Câmera por arrasto").setView(options)
+            .setPositiveButton("Salvar", (d,w) -> controls.setCameraOptions(.35f+slider.getProgress()/100f,horizontal.isChecked(),vertical.isChecked()))
+            .setNeutralButton("Padrão", (d,w) -> controls.setCameraOptions(1,false,false))
+            .setNegativeButton("Cancelar", null).create();
         dialog.setOnDismissListener(d -> { if (started && resumed) nativePause(false); immersive(); }); dialog.show();
     }
     private void stopGameView() {
@@ -266,7 +296,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         super.onNewIntent(intent); setIntent(intent);
         if (!(this instanceof GameActivity) && intent.getBooleanExtra("pickDisc", false) && LOAD_ERROR == null && !busy) pickDisc();
     }
-    @Override public void onWindowFocusChanged(boolean focus) { super.onWindowFocusChanged(focus); if (focus) immersive(); }
+    @Override public void onWindowFocusChanged(boolean focus) { super.onWindowFocusChanged(focus); if (focus) immersive(); else if (controls != null) controls.clear(); }
     private void immersive() {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
@@ -301,57 +331,5 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 axis(event, MotionEvent.AXIS_HAT_X), axis(event, MotionEvent.AXIS_HAT_Y)); return true;
         }
         return super.onGenericMotionEvent(event);
-    }
-    private final class Controls extends View {
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final SparseIntArray pointers = new SparseIntArray();
-        final float[] x = {.90f,.96f,.84f,.90f,.79f,.21f,.08f,.92f,.46f,.54f,.08f,.08f,.035f,.125f,.39f,.61f};
-        final float[] y = {.76f,.60f,.60f,.44f,.13f,.13f,.13f,.13f,.88f,.88f,.29f,.49f,.39f,.39f,.13f,.13f};
-        final int[] bits = {0x1000,0x2000,0x4000,0x8000,0x200,0x100,0x400,0x800,32,16,1,2,4,8,64,128};
-        final String[] labels = {"A","B","X","Y","Black","White","LT","RT","Back","Start","↑","↓","←","→","L3","R3"};
-        float lx, ly, rx, ry; int buttons;
-        Controls() { super(MainActivity.this); setContentDescription("Multitouch Xbox controls: two sticks, D-pad, A B X Y, triggers, Black, White, Start and Back"); }
-        float radius() { return Math.min(getWidth() * .041f, getHeight() * .073f); }
-        float stickRadius() { return Math.min(getWidth() * .09f, getHeight() * .18f); }
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            paint.setTextAlign(Paint.Align.CENTER); paint.setTextSize(dp(13));
-            for (int i = 0; i < x.length; ++i) {
-                paint.setColor((buttons & bits[i]) != 0 ? 0xbbaaee77 : 0x557e929f);
-                canvas.drawCircle(x[i]*getWidth(), y[i]*getHeight(), radius(), paint);
-                paint.setColor(0xddffffff); canvas.drawText(labels[i], x[i]*getWidth(), y[i]*getHeight()+dp(4), paint);
-            }
-            stick(canvas, .20f, .72f, lx, ly, "Move"); stick(canvas, .66f, .72f, rx, ry, "Camera");
-        }
-        void stick(Canvas canvas, float x, float y, float sx, float sy, String label) {
-            float cx = x*getWidth(), cy = y*getHeight(), r = stickRadius();
-            paint.setColor(0x447e929f); canvas.drawCircle(cx, cy, r, paint);
-            paint.setColor(0x9989a5b5); canvas.drawCircle(cx+sx*r*.6f, cy-sy*r*.6f, r*.4f, paint);
-            paint.setColor(0xaaffffff); canvas.drawText(label, cx, cy+r+dp(17), paint);
-        }
-        int hit(float px, float py) {
-            if (Math.hypot(px-.20f*getWidth(), py-.72f*getHeight()) < stickRadius()*1.2f) return 100;
-            if (Math.hypot(px-.66f*getWidth(), py-.72f*getHeight()) < stickRadius()*1.2f) return 101;
-            for (int i = 0; i < x.length; ++i) if (Math.hypot(px-x[i]*getWidth(), py-y[i]*getHeight()) < radius()*1.35f) return i;
-            return -1;
-        }
-        void clear() { pointers.clear(); buttons = 0; lx = ly = rx = ry = 0; if (started) nativeTouch(0,0,0,0,0); invalidate(); }
-        @Override public boolean onTouchEvent(MotionEvent event) {
-            int action = event.getActionMasked(), changed = event.getActionIndex();
-            if (action == MotionEvent.ACTION_CANCEL) { clear(); return true; }
-            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) pointers.put(event.getPointerId(changed), hit(event.getX(changed), event.getY(changed)));
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) pointers.delete(event.getPointerId(changed));
-            buttons = 0; lx = ly = rx = ry = 0;
-            for (int p = 0; p < event.getPointerCount(); ++p) {
-                int zone = pointers.get(event.getPointerId(p), -1);
-                if (zone == 100 || zone == 101) {
-                    float cx = (zone == 100 ? .20f : .66f)*getWidth(), cy = .72f*getHeight();
-                    float dx = (event.getX(p)-cx)/stickRadius(), dy = (cy-event.getY(p))/stickRadius();
-                    float length = (float)Math.max(1, Math.hypot(dx,dy)); dx /= length; dy /= length;
-                    if (zone == 100) { lx=dx; ly=dy; } else { rx=dx; ry=dy; }
-                } else if (zone >= 0 && zone < bits.length) buttons |= bits[zone];
-            }
-            if (started) nativeTouch(buttons,lx,ly,rx,ry); invalidate(); return true;
-        }
     }
 }

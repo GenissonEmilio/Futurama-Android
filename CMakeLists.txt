@@ -143,6 +143,7 @@ if(ANDROID)
     add_library(futurama_android SHARED
         src/platform/android/AndroidGame.cpp
         src/platform/android/AndroidInput.cpp
+        src/platform/android/TouchHudState.cpp
         src/platform/android/AndroidSoundBackend.cpp
         src/platform/android/MovieService.cpp
         src/render/gles/GLES3Device.cpp
@@ -182,11 +183,15 @@ if(FUT_BUILD_TESTS)
     add_executable(fut_portable_tests tests/PortableRuntimeTests.cpp)
     target_link_libraries(fut_portable_tests PRIVATE fut_core)
     add_test(NAME portable_runtime COMMAND fut_portable_tests)
-    foreach(suite IN ITEMS SaveStorage ResourceLifetime FilesystemSafety TextureConversion)
+    foreach(suite IN ITEMS SaveStorage ResourceLifetime FilesystemSafety TextureConversion AndroidInput TouchHudState)
         add_executable(fut_${suite}_tests tests/${suite}Tests.cpp)
         target_link_libraries(fut_${suite}_tests PRIVATE fut_core)
         add_test(NAME ${suite} COMMAND fut_${suite}_tests)
     endforeach()
+    target_sources(fut_AndroidInput_tests PRIVATE src/platform/android/AndroidInput.cpp)
+    target_sources(fut_TouchHudState_tests PRIVATE src/platform/android/TouchHudState.cpp)
+    find_package(Threads REQUIRED)
+    target_link_libraries(fut_AndroidInput_tests PRIVATE Threads::Threads)
     if(ANDROID)
         add_executable(fut_android_gles_tests tests/AndroidGlesTests.cpp)
         target_include_directories(fut_android_gles_tests PRIVATE src)
